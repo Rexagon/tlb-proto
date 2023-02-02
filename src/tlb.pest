@@ -7,7 +7,7 @@ COMMENT = _{
 tlb_scheme = _{ SOI ~ (constructor ~ ";")* ~ EOI }
 tlb_constructor = _{ SOI ~ constructor ~ ";"? ~ EOI }
 
-constructor = { constructor_name ~ type_arg* ~ field_group_item* ~ "=" ~ output_type }
+constructor = { constructor_name ~ generic* ~ field_group_item* ~ "=" ~ output_type }
 
 // Constructor name
 constructor_name = { ("_" | lc_ident) ~ constructor_id? }
@@ -20,20 +20,29 @@ constructor_id_hex = @{ ident_char+ }
 constructor_id_empty = @{ "_" }
 
 // Named type argument
-type_arg = { "{" ~ ident ~ ":" ~ type_expr ~ "}" }
+generic = { "{" ~ ident ~ ":" ~ (nat_type | type) ~ "}" }
 
-// Multiple fields
+// Field or guard or a group of fields in a child cell
 field_group_item = {
     (("_" ~ ":")? ~ "^[" ~ field_group_item+ ~ "]") |
     field |
     guard_expr
 }
 // Field with name or unnamed
-field = { field_named | type_expr }
-// Field with name
-field_named = { field_ident ~ ":" ~ conditional_def? ~ type_expr }
+field = { (("_" | ident) ~ ":" ~ field_condition?)? ~ type_expr }
 // Optional field which is set only if the specified bit is set
-conditional_def = { ident ~ "." ~ nat_const ~ "?" }
+field_condition = { ident ~ "." ~ nat_const ~ "?" }
+// Guard expression
+guard_expr = { "{" ~ ident ~ guard_expr_operator ~ (nat_const | ident) ~ "}" }
+// Comparison operator for guard expression
+guard_expr_operator = @{ "<=" | "<" | "=" | ">=" | ">" }
+
+// Output type with type parameters substitution
+output_type = { uc_ident ~ type_expr* }
+
+
+// Type-level type
+type = @{ "Type" }
 
 // Type expression
 type_expr = {
@@ -41,41 +50,28 @@ type_expr = {
     nat_type |
     ident |
     type_in_cell |
-    ( "(" ~ (nat_type_eq_bits | nat_type_le_bits | nat_type_lt_bits) ~ ")" ) |
-    ( "(" ~ type_nat_expr ~ ")" ) |
+    ( "(" ~ (nat_type_width | nat_type_leq | nat_type_less) ~ ")" ) |
+    ( "(" ~ nat_expr ~ ")" ) |
     ( "(" ~ ident ~ type_expr* ~ ")" )
 }
-// Put type to the child cell
+// Type serialized in a child cell
 type_in_cell = { "^" ~ type_expr }
-type_nat_expr = { ident ~ nat_operator ~ (nat_const | ident) }
 
-// Possibly anonymous field ident
-field_ident = @{ "_" | ident }
-
-// Guard expression
-guard_expr = {
-    "{" ~ ident ~ guard_operator ~ (nat_const | ident) ~ "}"
-}
-// Comparison operator
-guard_operator = @{ "<=" | "<" | "=" | ">=" | ">" }
-
-// Output type with type parameters substitution
-output_type = { uc_ident ~ type_expr* }
-
-// [a-zA-Z0-9_]
-ident_char = @{ ASCII_ALPHANUMERIC | "_" }
-
+// Expression with integer value
+nat_expr = { ident ~ nat_expr_operator ~ (nat_const | ident) }
 // Operator for idents with nat consts
-nat_operator = @{ "+" | "-" | "*" | "/" }
+nat_expr_operator = @{ "+" | "-" | "*" | "/" }
 
 // Alias to uint32
 nat_type = @{ "#" }
 // N-bit integer
-nat_type_eq_bits = { "##" ~ (nat_const | ident) }
+nat_type_width = { "##" ~ (nat_const | ident) }
 // Variable integer with at most N bits
-nat_type_le_bits = { "#<=" ~ (nat_const | ident) }
+nat_type_leq = { "#<=" ~ (nat_const | ident) }
 // Variable integer with less than N bits
-nat_type_lt_bits = { "#<" ~ (nat_const | ident) }
+nat_type_less = { "#<" ~ (nat_const | ident) }
+// Constants
+nat_const = @{ ASCII_DIGIT+ }
 
 // Field or type ident
 ident = @{ lc_ident | uc_ident }
@@ -83,6 +79,5 @@ ident = @{ lc_ident | uc_ident }
 lc_ident = @{ ASCII_ALPHA_LOWER ~ ident_char* }
 // Ident starting from the uppercase letter
 uc_ident = @{ ASCII_ALPHA_UPPER ~ ident_char* }
-
-// Constants
-nat_const = @{ ASCII_DIGIT+ }
+// [a-zA-Z0-9_]
+ident_char = @{ ASCII_ALPHANUMERIC | "_" }

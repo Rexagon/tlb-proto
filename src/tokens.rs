@@ -12,7 +12,7 @@ pub struct Constructor<'a> {
     /// Constructor id.
     pub id: Option<ConstructorId>,
     /// Type arguments.
-    pub type_args: Vec<TypeArg<'a>>,
+    pub generics: Vec<Generic<'a>>,
     /// Field groups.
     pub fields: Vec<FieldGroupItem<'a>>,
     /// Output type.
@@ -53,11 +53,20 @@ impl From<ConstructorRadix> for u32 {
 
 /// Object type argument.
 #[derive(Debug, Clone, Eq, PartialEq)]
-pub struct TypeArg<'a> {
+pub struct Generic<'a> {
     /// Type argument name.
     pub ident: &'a str,
     /// Argument type.
-    pub ty: TypeExpr<'a>,
+    pub ty: GenericType,
+}
+
+/// Generic argument type.
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum GenericType {
+    /// Unsigned integer type.
+    Nat,
+    /// Type-level type.
+    Type,
 }
 
 /// Object field group item.
@@ -76,15 +85,15 @@ pub enum FieldGroupItem<'a> {
 pub struct Field<'a> {
     /// Optional field name.
     pub ident: Option<&'a str>,
+    /// Optional field condition.
+    pub condition: Option<FieldCondition<'a>>,
     /// Field type.
     pub ty: TypeExpr<'a>,
-    /// Optional field condition.
-    pub condition: Option<FieldFlag<'a>>,
 }
 
 /// Flags bit and identifier for conditional fields.
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
-pub struct FieldFlag<'a> {
+pub struct FieldCondition<'a> {
     /// Identifier of the numeric field with flags.
     pub ident: &'a str,
     /// Bit number in the flags field.
@@ -113,7 +122,7 @@ pub enum TypeExpr<'a> {
     /// test field:(#<= 10) = Test;
     /// test field:(#< 10) = Test;
     /// ```
-    NatSubset(NatSubsetBits<'a>),
+    AltNat(AltNat<'a>),
     /// Expression with integer values.
     ///
     /// ```text
@@ -136,13 +145,13 @@ pub enum TypeExpr<'a> {
 
 /// Integer with explicit bit representation.
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
-pub enum NatSubsetBits<'a> {
+pub enum AltNat<'a> {
     /// Integer with the fixed number of bits, `(## n)`.
-    Eq(NatValue<'a>),
+    Width(NatValue<'a>),
     /// Integer with at most the specified number of bits, `(#<= n)`.
-    Le(NatValue<'a>),
+    Leq(NatValue<'a>),
     /// Integer with less bits than specified, `(#< n)`.
-    Lt(NatValue<'a>),
+    Less(NatValue<'a>),
 }
 
 /// Integer value.

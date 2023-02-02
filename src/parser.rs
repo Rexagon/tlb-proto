@@ -4,6 +4,22 @@ use pest::Parser;
 use crate::grammar::*;
 use crate::tokens::*;
 
+impl<'a> Scheme<'a> {
+    pub fn parse(s: &'a str) -> Result<Self, ParserError> {
+        let pairs = Grammar::parse(Rule::tlb_scheme, s)
+            .map_err(|e| ParserError::InvalidInput(Box::new(e)))?;
+
+        let mut declarations = Vec::new();
+        for pair in pairs {
+            if pair.as_rule() == Rule::constructor {
+                declarations.push(parse_constructor(pair)?);
+            }
+        }
+
+        Ok(Self { declarations })
+    }
+}
+
 impl<'a> Constructor<'a> {
     pub fn parse(s: &'a str) -> Result<Self, ParserError> {
         Grammar::parse(Rule::tlb_constructor, s)
@@ -24,9 +40,9 @@ fn parse_constructor(pair: Pair<'_, Rule>) -> Result<Constructor<'_>, ParserErro
         parse_constructor_name(pair)?
     };
 
-    let mut type_args = Vec::new();
-    read_same_rules(&mut pairs, Rule::type_arg, |pair| {
-        type_args.push(parse_type_arg(pair)?);
+    let mut generics = Vec::new();
+    read_same_rules(&mut pairs, Rule::generic, |pair| {
+        generics.push(parse_type_arg(pair)?);
         Ok(())
     })?;
 
@@ -45,7 +61,7 @@ fn parse_constructor(pair: Pair<'_, Rule>) -> Result<Constructor<'_>, ParserErro
     Ok(Constructor {
         name,
         id,
-        type_args,
+        generics,
         fields,
         output_type,
     })
@@ -92,11 +108,15 @@ fn parse_constructor_id(pair: Pair<'_, Rule>) -> Result<ConstructorId, ParserErr
     Ok(ConstructorId::Explicit { radix, value, bits })
 }
 
-fn parse_type_arg(pair: Pair<'_, Rule>) -> Result<TypeArg<'_>, ParserError> {
+fn parse_type_arg(pair: Pair<'_, Rule>) -> Result<Generic<'_>, ParserError> {
     let mut pairs = pair.into_inner();
     let ident = pairs.next().unwrap().as_str();
-    let ty = parse_type_expr(pairs.next().unwrap())?;
-    Ok(TypeArg { ident, ty })
+    let ty = match pairs.next().unwrap().as_rule() {
+        Rule::nat_type => GenericType::Nat,
+        Rule::r#type => GenericType::Type,
+        rule => return Err(ParserError::UnexpectedRule(rule)),
+    };
+    Ok(Generic { ident, ty })
 }
 
 fn parse_field_group_item(pair: Pair<'_, Rule>) -> Result<FieldGroupItem<'_>, ParserError> {
@@ -123,45 +143,39 @@ fn parse_field_group_item(pair: Pair<'_, Rule>) -> Result<FieldGroupItem<'_>, Pa
 }
 
 fn parse_field(pair: Pair<'_, Rule>) -> Result<Field<'_>, ParserError> {
-    let pair = pair.into_inner().next().unwrap();
+    let mut pairs = pair.into_inner().peekable();
 
-    Ok(match pair.as_rule() {
-        Rule::type_expr => Field {
-            ident: None,
-            ty: parse_type_expr(pair)?,
-            condition: None,
-        },
-        Rule::field_named => {
-            let mut pairs = pair.into_inner().peekable();
+    let mut ident = None;
+    if let Some(next) = pairs.peek() {
+        if next.as_rule() == Rule::ident {
+            ident = Some(next.as_str());
+            pairs.next();
+        }
+    }
 
-            let ident = pairs.next().unwrap().as_str();
+    let mut condition = None;
+    if let Some(next) = pairs.peek() {
+        if next.as_rule() == Rule::field_condition {
+            if let Some(pair) = pairs.next() {
+                let mut pairs = pair.into_inner();
 
-            let mut condition = None;
-            if let Some(next) = pairs.peek() {
-                if next.as_rule() == Rule::conditional_def {
-                    if let Some(pair) = pairs.next() {
-                        let mut pairs = pair.into_inner();
+                let ident = pairs.next().unwrap().as_str();
+                let bit = pairs.next().unwrap().as_str();
 
-                        let ident = pairs.next().unwrap().as_str();
-                        let bit = pairs.next().unwrap().as_str();
-
-                        condition = Some(FieldFlag {
-                            ident,
-                            bit: bit.parse().map_err(ParserError::InvalidNatConst)?,
-                        });
-                    }
-                }
-            }
-
-            let ty = parse_type_expr(pairs.next().unwrap())?;
-
-            Field {
-                ident: Some(ident),
-                ty,
-                condition,
+                condition = Some(FieldCondition {
+                    ident,
+                    bit: bit.parse().map_err(ParserError::InvalidNatConst)?,
+                });
             }
         }
-        rule => return Err(ParserError::UnexpectedRule(rule)),
+    }
+
+    let ty = parse_type_expr(pairs.next().unwrap())?;
+
+    Ok(Field {
+        ident,
+        condition,
+        ty,
     })
 }
 
@@ -191,16 +205,16 @@ fn parse_type_expr(pair: Pair<'_, Rule>) -> Result<TypeExpr<'_>, ParserError> {
             TypeExpr::Const(value)
         }
         Rule::nat_type => TypeExpr::Nat,
-        Rule::nat_type_eq_bits => TypeExpr::NatSubset(NatSubsetBits::Eq(parse_nat_value(
+        Rule::nat_type_width => TypeExpr::AltNat(AltNat::Width(parse_nat_value(
             pair.into_inner().next().unwrap(),
         )?)),
-        Rule::nat_type_le_bits => TypeExpr::NatSubset(NatSubsetBits::Le(parse_nat_value(
+        Rule::nat_type_leq => TypeExpr::AltNat(AltNat::Leq(parse_nat_value(
             pair.into_inner().next().unwrap(),
         )?)),
-        Rule::nat_type_lt_bits => TypeExpr::NatSubset(NatSubsetBits::Lt(parse_nat_value(
+        Rule::nat_type_less => TypeExpr::AltNat(AltNat::Less(parse_nat_value(
             pair.into_inner().next().unwrap(),
         )?)),
-        Rule::type_nat_expr => TypeExpr::NatExpr(parse_nat_expr(pair)?),
+        Rule::nat_expr => TypeExpr::NatExpr(parse_nat_expr(pair)?),
         Rule::ident => {
             let mut types = Vec::new();
             for pair in pairs {
@@ -310,6 +324,11 @@ pub enum ParserError {
 mod tests {
     use super::*;
 
+    fn check_scheme(s: &str) {
+        let s = Scheme::parse(s).unwrap();
+        println!("{s:#?}");
+    }
+
     fn check_constructor(s: &str) {
         let c = Constructor::parse(s).unwrap();
         println!("{c:#?}");
@@ -330,5 +349,24 @@ mod tests {
         check_constructor("pair$_ {X:Type} {Y:Type} first:X second:Y = Both X Y");
 
         check_constructor("bit$_ (## 1) = Bit");
+    }
+
+    #[test]
+    fn scheme_with_guards() {
+        check_scheme(
+            r####"
+            addr_none$00 = MsgAddressExt;
+            addr_extern$01 len:(## 9) external_address:(bits len)
+                        = MsgAddressExt;
+            anycast_info$_ depth:(#<= 30) { depth >= 1 }
+            rewrite_pfx:(bits depth) = Anycast;
+            addr_std$10 anycast:(Maybe Anycast)
+            workchain_id:int8 address:bits256  = MsgAddressInt;
+            addr_var$11 anycast:(Maybe Anycast) addr_len:(## 9)
+            workchain_id:int32 address:(bits addr_len) = MsgAddressInt;
+            _ _:MsgAddressInt = MsgAddress;
+            _ _:MsgAddressExt = MsgAddress;
+            "####,
+        );
     }
 }
