@@ -59,7 +59,6 @@ fn parse_constructor(ctx: &mut Context, pair: Pair<'_, Rule>) -> Result<Construc
 
     let (name, tag) = {
         let pair = pairs.next().unwrap();
-        ensure_rule(&pair, Rule::constructor_name)?;
         parse_constructor_name(ctx, pair)?
     };
 
@@ -77,7 +76,6 @@ fn parse_constructor(ctx: &mut Context, pair: Pair<'_, Rule>) -> Result<Construc
 
     let output_type = {
         let pair = pairs.next().unwrap();
-        ensure_rule(&pair, Rule::output_type)?;
         parse_output_type(ctx, pair)?
     };
 
@@ -129,7 +127,7 @@ fn parse_constructor_tag(pair: Pair<'_, Rule>) -> Result<ConstructorTag, ParserE
         Rule::constructor_tag_empty => return Ok(ConstructorTag::Empty),
         Rule::constructor_tag_binary => (2, tag_raw.len() as u8),
         Rule::constructor_tag_hex => (16, (tag_raw.len() * 4) as u8),
-        rule => return Err(ParserError::UnexpectedRule(rule)),
+        _ => unreachable!(),
     };
 
     let value = u32::from_str_radix(tag_raw, radix).map_err(ParserError::InvalidConstructorTag)?;
@@ -143,7 +141,7 @@ fn parse_type_arg(ctx: &mut Context, pair: Pair<'_, Rule>) -> Result<Generic, Pa
     let ty = match pairs.next().unwrap().as_rule() {
         Rule::nat_type => GenericType::Nat,
         Rule::r#type => GenericType::Type,
-        rule => return Err(ParserError::UnexpectedRule(rule)),
+        _ => unreachable!(),
     };
     Ok(Generic { ident, ty })
 }
@@ -176,8 +174,7 @@ fn parse_field_group_item(
     for pair in pairs {
         fields.push(parse_field_group_item(ctx, pair)?);
     }
-
-    return Ok(FieldGroupItem::ChildCell(fields));
+    Ok(FieldGroupItem::ChildCell(fields))
 }
 
 fn parse_field(ctx: &mut Context, pair: Pair<'_, Rule>) -> Result<Field, ParserError> {
@@ -270,7 +267,7 @@ fn parse_type_expr(ctx: &mut Context, pair: Pair<'_, Rule>) -> Result<TypeExpr, 
             let inner = pair.into_inner().next().unwrap();
             TypeExpr::ChildCell(Box::new(parse_type_expr(ctx, inner)?))
         }
-        rule => return Err(ParserError::UnexpectedRule(rule)),
+        _ => unreachable!(),
     })
 }
 
@@ -317,7 +314,7 @@ fn parse_nat_value(ctx: &mut Context, pair: Pair<'_, Rule>) -> Result<NatValue, 
             .parse()
             .map(NatValue::Const)
             .map_err(ParserError::InvalidNatConst),
-        rule => Err(ParserError::UnexpectedRule(rule)),
+        _ => unreachable!(),
     }
 }
 
@@ -341,21 +338,10 @@ where
     Ok(())
 }
 
-fn ensure_rule(pair: &Pair<'_, Rule>, rule: Rule) -> Result<(), ParserError> {
-    let pair_rule = pair.as_rule();
-    if pair_rule == rule {
-        Ok(())
-    } else {
-        Err(ParserError::UnexpectedRule(pair_rule))
-    }
-}
-
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum ParserError {
     #[error("invalid input:\n{0}")]
     InvalidInput(Box<pest::error::Error<Rule>>),
-    #[error("unexpected rule: {0:?}")]
-    UnexpectedRule(Rule),
     #[error("invalid constructor tag")]
     InvalidConstructorTag(#[source] std::num::ParseIntError),
     #[error("invalid integer constant")]
