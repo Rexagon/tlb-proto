@@ -1,3 +1,5 @@
+use std::num::NonZeroU8;
+
 use crc::{Crc, CRC_32_ISO_HDLC};
 
 use crate::parser::ast::*;
@@ -19,9 +21,9 @@ pub fn compute_tag(ctx: &Context, constructor: &Constructor) -> ConstructorTag {
     let mut checksum = Checksum(CRC.digest());
     write!(&mut checksum, "{}", CrcCtx(constructor, ctx)).unwrap();
 
-    ConstructorTag::Explicit {
+    ConstructorTag {
         value: checksum.0.finalize(),
-        bits: 32,
+        bits: NonZeroU8::new(32).unwrap(),
     }
 }
 
@@ -184,13 +186,7 @@ mod tests {
     fn check_tag(tlb: &str, tag: u32) {
         let mut ctx = Context::default();
         let constructor = Constructor::parse(&mut ctx, tlb).unwrap();
-        assert_eq!(
-            constructor.tag,
-            ConstructorTag::Explicit {
-                value: tag,
-                bits: 32
-            }
-        );
+        assert_eq!(constructor.tag, Some(ConstructorTag::from(tag)));
     }
 
     #[test]

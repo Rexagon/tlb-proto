@@ -1,3 +1,5 @@
+use std::num::NonZeroU8;
+
 use pest::iterators::{Pair, Pairs};
 use pest::Parser;
 use string_interner::StringInterner;
@@ -80,8 +82,8 @@ fn parse_constructor(ctx: &mut Context, pair: Pair<'_, Rule>) -> Result<Construc
     };
 
     let (tag, should_compute) = match tag {
-        Some(tag) => (tag, false),
-        None => (ConstructorTag::Empty, name.is_some()),
+        ParsedConstructorTag::Explicit(tag) => (tag, false),
+        ParsedConstructorTag::Implicit => (None, name.is_some()),
     };
 
     let mut result = Constructor {
@@ -93,7 +95,7 @@ fn parse_constructor(ctx: &mut Context, pair: Pair<'_, Rule>) -> Result<Construc
     };
 
     if should_compute {
-        result.tag = compute_tag(ctx, &result);
+        result.tag = Some(compute_tag(ctx, &result));
     }
 
     Ok(result)
@@ -102,7 +104,7 @@ fn parse_constructor(ctx: &mut Context, pair: Pair<'_, Rule>) -> Result<Construc
 fn parse_constructor_name(
     ctx: &mut Context,
     pair: Pair<'_, Rule>,
-) -> Result<(Option<Symbol>, Option<ConstructorTag>), ParserError> {
+) -> Result<(Option<Symbol>, ParsedConstructorTag), ParserError> {
     let mut pairs = pair.into_inner().peekable();
 
     let mut name = None;
@@ -113,26 +115,32 @@ fn parse_constructor_name(
         }
     }
 
-    let mut constructor_tag = None;
-    if let Some(next) = pairs.next() {
-        constructor_tag = Some(parse_constructor_tag(next)?);
-    }
+    let constructor_tag = if let Some(next) = pairs.next() {
+        ParsedConstructorTag::Explicit(parse_constructor_tag(next)?)
+    } else {
+        ParsedConstructorTag::Implicit
+    };
 
     Ok((name, constructor_tag))
 }
 
-fn parse_constructor_tag(pair: Pair<'_, Rule>) -> Result<ConstructorTag, ParserError> {
+enum ParsedConstructorTag {
+    Implicit,
+    Explicit(Option<ConstructorTag>),
+}
+
+fn parse_constructor_tag(pair: Pair<'_, Rule>) -> Result<Option<ConstructorTag>, ParserError> {
     let tag_raw = pair.as_str();
     let (radix, bits) = match pair.as_rule() {
-        Rule::constructor_tag_empty => return Ok(ConstructorTag::Empty),
+        Rule::constructor_tag_empty => return Ok(None),
         Rule::constructor_tag_binary => (2, tag_raw.len() as u8),
         Rule::constructor_tag_hex => (16, (tag_raw.len() * 4) as u8),
         _ => unreachable!(),
     };
-
-    let value = u32::from_str_radix(tag_raw, radix).map_err(ParserError::InvalidConstructorTag)?;
-
-    Ok(ConstructorTag::Explicit { value, bits })
+    let bits = NonZeroU8::new(bits).ok_or(ParserError::InvalidConstructorTag)?;
+    let value =
+        u32::from_str_radix(tag_raw, radix).map_err(|_| ParserError::InvalidConstructorTag)?;
+    Ok(Some(ConstructorTag { value, bits }))
 }
 
 fn parse_type_arg(ctx: &mut Context, pair: Pair<'_, Rule>) -> Result<Generic, ParserError> {
@@ -343,7 +351,7 @@ pub enum ParserError {
     #[error("invalid input:\n{0}")]
     InvalidInput(Box<pest::error::Error<Rule>>),
     #[error("invalid constructor tag")]
-    InvalidConstructorTag(#[source] std::num::ParseIntError),
+    InvalidConstructorTag,
     #[error("invalid integer constant")]
     InvalidNatConst(#[source] std::num::ParseIntError),
     #[error("unknown operator")]

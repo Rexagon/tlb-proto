@@ -1,3 +1,5 @@
+use std::num::NonZeroU8;
+
 use crate::parser::Symbol;
 
 #[derive(Debug, Clone)]
@@ -12,7 +14,7 @@ pub struct Constructor {
     /// Optional constructor name.
     pub name: Option<Symbol>,
     /// Constructor tag.
-    pub tag: ConstructorTag,
+    pub tag: Option<ConstructorTag>,
     /// Type arguments.
     pub generics: Vec<Generic>,
     /// Field groups.
@@ -23,14 +25,20 @@ pub struct Constructor {
 
 /// Object constructor tag.
 #[derive(Debug, Clone, Eq, PartialEq)]
-pub enum ConstructorTag {
-    Empty,
-    Explicit {
-        /// Constructor value.
-        value: u32,
-        /// Constructor length in bits.
-        bits: u8,
-    },
+pub struct ConstructorTag {
+    /// Constructor length in bits.
+    pub bits: NonZeroU8,
+    /// Constructor value.
+    pub value: u32,
+}
+
+impl From<u32> for ConstructorTag {
+    fn from(value: u32) -> Self {
+        Self {
+            bits: NonZeroU8::new(32).unwrap(),
+            value,
+        }
+    }
 }
 
 /// Object type argument.
