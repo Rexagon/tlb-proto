@@ -35,7 +35,7 @@ mod tests {
     }
 
     #[test]
-    fn simple_with_guards() {
+    fn simple_with_constraints() {
         check_scheme(
             r####"
             addr_none$00 = MsgAddressExt;

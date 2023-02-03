@@ -1,5 +1,2 @@
-pub use self::tokens::*;
-
-pub mod grammar;
-mod parser;
-mod tokens;
+pub mod generator;
+pub mod parser;

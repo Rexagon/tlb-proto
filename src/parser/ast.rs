@@ -1,31 +1,31 @@
+use crate::parser::Symbol;
+
 #[derive(Debug, Clone)]
-pub struct Scheme<'a> {
+pub struct Scheme {
     /// Constructor declarations.
-    pub declarations: Vec<Constructor<'a>>,
+    pub declarations: Vec<Constructor>,
 }
 
 /// Object declaration.
 #[derive(Debug, Clone)]
-pub struct Constructor<'a> {
+pub struct Constructor {
     /// Optional constructor name.
-    pub name: Option<&'a str>,
-    /// Constructor id.
-    pub id: Option<ConstructorId>,
+    pub name: Option<Symbol>,
+    /// Constructor tag.
+    pub tag: ConstructorTag,
     /// Type arguments.
-    pub generics: Vec<Generic<'a>>,
+    pub generics: Vec<Generic>,
     /// Field groups.
-    pub fields: Vec<FieldGroupItem<'a>>,
+    pub fields: Vec<FieldGroupItem>,
     /// Output type.
-    pub output_type: (&'a str, Vec<TypeExpr<'a>>),
+    pub output_type: (Symbol, Vec<TypeExpr>),
 }
 
-/// Object constructor id.
-#[derive(Debug, Clone)]
-pub enum ConstructorId {
+/// Object constructor tag.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub enum ConstructorTag {
     Empty,
     Explicit {
-        /// Representation kind.
-        radix: ConstructorRadix,
         /// Constructor value.
         value: u32,
         /// Constructor length in bits.
@@ -33,29 +33,11 @@ pub enum ConstructorId {
     },
 }
 
-/// Constructor representation kind.
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
-pub enum ConstructorRadix {
-    /// Explicit id in binary base.
-    Binary,
-    /// Explicit id in hex base.
-    Hex,
-}
-
-impl From<ConstructorRadix> for u32 {
-    fn from(value: ConstructorRadix) -> Self {
-        match value {
-            ConstructorRadix::Binary => 2,
-            ConstructorRadix::Hex => 16,
-        }
-    }
-}
-
 /// Object type argument.
 #[derive(Debug, Clone, Eq, PartialEq)]
-pub struct Generic<'a> {
+pub struct Generic {
     /// Type argument name.
-    pub ident: &'a str,
+    pub ident: Symbol,
     /// Argument type.
     pub ty: GenericType,
 }
@@ -69,40 +51,49 @@ pub enum GenericType {
     Type,
 }
 
+impl std::fmt::Display for GenericType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Nat => "#",
+            Self::Type => "Type",
+        })
+    }
+}
+
 /// Object field group item.
 #[derive(Debug, Clone, Eq, PartialEq)]
-pub enum FieldGroupItem<'a> {
+pub enum FieldGroupItem {
     /// Object field.
-    Field(Field<'a>),
-    /// Type guard used to check field values.
-    Guard(GuardExpr<'a>),
+    Field(Field),
+    /// Field constraint used to check field values.
+    Constraint(ConstraintExpr),
     /// A group of fields in the child cell.
-    ChildCell(Vec<FieldGroupItem<'a>>),
+    ChildCell(Vec<FieldGroupItem>),
 }
 
 /// Object field.
 #[derive(Debug, Clone, Eq, PartialEq)]
-pub struct Field<'a> {
+pub struct Field {
     /// Optional field name.
-    pub ident: Option<&'a str>,
+    pub ident: Option<Symbol>,
     /// Optional field condition.
-    pub condition: Option<FieldCondition<'a>>,
+    pub condition: Option<FieldCondition>,
     /// Field type.
-    pub ty: TypeExpr<'a>,
+    pub ty: TypeExpr,
 }
 
 /// Flags bit and identifier for conditional fields.
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
-pub struct FieldCondition<'a> {
+pub struct FieldCondition {
     /// Identifier of the numeric field with flags.
-    pub ident: &'a str,
+    pub ident: Symbol,
     /// Bit number in the flags field.
     pub bit: u16,
 }
 
 /// Type expression.
 #[derive(Debug, Clone, Eq, PartialEq)]
-pub enum TypeExpr<'a> {
+pub enum TypeExpr {
     /// Integer constant.
     ///
     /// ```text
@@ -122,54 +113,61 @@ pub enum TypeExpr<'a> {
     /// test field:(#<= 10) = Test;
     /// test field:(#< 10) = Test;
     /// ```
-    AltNat(AltNat<'a>),
+    AltNat(AltNat),
     /// Expression with integer values.
     ///
     /// ```text
     /// test {n:#} field:(n + 1) = Test;
     /// ```
-    NatExpr(NatExpr<'a>),
+    NatExpr(NatExpr),
     /// Type identifier with type parameters.
     ///
     /// ```text
     /// test {X:Type} field:(HashMap 64 X) = Test;
     /// ```
-    Ident(&'a str, Vec<TypeExpr<'a>>),
+    Ident(Symbol, Vec<TypeExpr>),
     /// Type serialized into a separate cell.
     ///
     /// ```text
     /// test field:^(## 64) = Test;
     /// ```
-    ChildCell(Box<TypeExpr<'a>>),
+    ChildCell(Box<TypeExpr>),
 }
 
 /// Integer with explicit bit representation.
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
-pub enum AltNat<'a> {
+pub enum AltNat {
     /// Integer with the fixed number of bits, `(## n)`.
-    Width(NatValue<'a>),
+    Width(NatValue),
     /// Integer with at most the specified number of bits, `(#<= n)`.
-    Leq(NatValue<'a>),
+    Leq(NatValue),
     /// Integer with less bits than specified, `(#< n)`.
-    Less(NatValue<'a>),
+    Less(NatValue),
 }
 
 /// Integer value.
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
-pub enum NatValue<'a> {
+pub enum NatValue {
     /// Integer constant.
     Const(u32),
     /// Type or field identifier.
-    Ident(&'a str),
+    Ident(Symbol),
+}
+
+impl NatValue {
+    /// Returns `true` if the value is constant.
+    pub fn is_const(&self) -> bool {
+        matches!(self, Self::Const(_))
+    }
 }
 
 /// Simple expression with integer operands.
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
-pub struct NatExpr<'a> {
+pub struct NatExpr {
     /// Type or field identifier.
-    pub left: NatValue<'a>,
+    pub left: NatValue,
     /// Type or field identifier.
-    pub right: NatValue<'a>,
+    pub right: NatValue,
     /// Binary operator.
     pub op: NatOperator,
 }
@@ -183,24 +181,32 @@ pub enum NatOperator {
     Sub,
     /// `*`
     Mul,
-    /// `/`
-    Div,
 }
 
-/// Guard expression used to add checks to the parsed fields.
+impl std::fmt::Display for NatOperator {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Add => "+",
+            Self::Sub => "-",
+            Self::Mul => "*",
+        })
+    }
+}
+
+/// Constraint expression used to add checks to the parsed fields.
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
-pub struct GuardExpr<'a> {
+pub struct ConstraintExpr {
     /// Type or field identifier.
-    pub left: NatValue<'a>,
+    pub left: NatValue,
     /// Type or field identifier.
-    pub right: NatValue<'a>,
+    pub right: NatValue,
     /// Comparison operator.
-    pub op: GuardOperator,
+    pub op: ConstraintOperator,
 }
 
-/// Comparison operator used in guard expression.
+/// Comparison operator used in constraint expression.
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
-pub enum GuardOperator {
+pub enum ConstraintOperator {
     /// `<`
     Lt,
     /// `<=`
@@ -211,4 +217,16 @@ pub enum GuardOperator {
     Ge,
     /// `>`
     Gt,
+}
+
+impl std::fmt::Display for ConstraintOperator {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Lt => "<",
+            Self::Le => "<=",
+            Self::Eq => "=",
+            Self::Ge => ">=",
+            Self::Gt => ">",
+        })
+    }
 }
