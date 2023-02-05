@@ -1,4 +1,5 @@
 use super::bit_pfx_collection::{lower_bit, BitPfxCollection};
+use super::conflict_graph::ConflictGraph;
 
 #[derive(Default)]
 pub struct BinTrieBuilder {
@@ -96,6 +97,25 @@ impl std::fmt::Debug for BinTrie {
         }
 
         map.finish()
+    }
+}
+
+impl ConflictGraph {
+    pub fn fill_from(&mut self, trie: &BinTrie) {
+        fill_conflict_graph(self, &trie.root, 0);
+    }
+}
+
+fn fill_conflict_graph(graph: &mut ConflictGraph, node: &BinTrieNode, mut colors: u64) {
+    colors |= node.tag;
+    if node.left.is_none() || node.right.is_none() {
+        graph.add(colors.into());
+    }
+    if let Some(left) = &node.left {
+        fill_conflict_graph(graph, left, colors);
+    }
+    if let Some(right) = &node.right {
+        fill_conflict_graph(graph, right, colors);
     }
 }
 
@@ -222,5 +242,13 @@ mod tests {
         assert_eq!(trie.get(0xabc8000000000000), Some((1 << 1) | (1 << 0)));
         assert_eq!(trie.get(0x0280000000000000), Some(1 << 2));
         assert_eq!(trie.get(0x2280000000000000), Some(1 << 3));
+
+        let mut graph = ConflictGraph::default();
+        graph.fill_from(&trie);
+        println!("graph: {graph:#?}");
+
+        for i in 0..4 {
+            assert!(graph.check(i, i))
+        }
     }
 }
