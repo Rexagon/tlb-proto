@@ -21,6 +21,10 @@ pub struct Context {
 }
 
 impl Context {
+    pub fn get_symbol<T: AsRef<str>>(&self, string: T) -> Option<Symbol> {
+        self.interner.get(string).map(Into::into)
+    }
+
     pub fn resolve_symbol(&self, symbol: Symbol) -> Option<&str> {
         self.interner.resolve(symbol.into())
     }
@@ -76,7 +80,7 @@ fn parse_constructor(ctx: &mut Context, pair: Pair<'_, Rule>) -> Result<Construc
         Ok(())
     })?;
 
-    let output_type = {
+    let (output_type, output_type_args) = {
         let pair = pairs.next().unwrap();
         parse_output_type(ctx, pair)?
     };
@@ -92,6 +96,7 @@ fn parse_constructor(ctx: &mut Context, pair: Pair<'_, Rule>) -> Result<Construc
         generics,
         fields,
         output_type,
+        output_type_args,
     };
 
     if should_compute {

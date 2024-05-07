@@ -86,8 +86,10 @@ impl BitPfxCollection {
         self.items.truncate(j);
     }
 
-    /// Merges current prefix collection with the provided
-    pub fn merge(&mut self, other: Self) {
+    /// Merges current prefix collection with the provided.
+    ///
+    /// Returns `true` if the collection was changed.
+    pub fn merge(&mut self, other: &Self) -> bool {
         struct Interval {
             prefix: u64,
             start: u64,
@@ -108,15 +110,15 @@ impl BitPfxCollection {
         let mut v = match other.items.first() {
             Some(&item) => Interval::new(item),
             // Merging with empty collection <=> noop
-            None => return,
+            None => return false,
         };
         // Get interval for the "lowest" prefix from the current collection
         let mut u = match self.items.first() {
             Some(&item) => Interval::new(item),
             // Just return other collection if the current is empty
             None => {
-                self.items = other.items;
-                return;
+                self.items = other.items.clone();
+                return true;
             }
         };
 
@@ -177,6 +179,9 @@ impl BitPfxCollection {
 
         // Update elements of the current collection
         self.items = result.items;
+
+        // Return whether the collection was changed
+        self.items != other.items
     }
 
     /// Adds prefix to the end of prefixes list,
@@ -263,13 +268,28 @@ impl Add for BitPfxCollection {
     type Output = Self;
 
     fn add(mut self, rhs: Self) -> Self::Output {
-        self.merge(rhs);
+        self.merge(&rhs);
         self
     }
 }
 
 impl AddAssign for BitPfxCollection {
     fn add_assign(&mut self, rhs: Self) {
+        self.merge(&rhs);
+    }
+}
+
+impl Add<&BitPfxCollection> for BitPfxCollection {
+    type Output = Self;
+
+    fn add(mut self, rhs: &Self) -> Self::Output {
+        self.merge(rhs);
+        self
+    }
+}
+
+impl AddAssign<&BitPfxCollection> for BitPfxCollection {
+    fn add_assign(&mut self, rhs: &Self) {
         self.merge(rhs);
     }
 }

@@ -43,8 +43,8 @@ impl std::fmt::Display for CrcCtx<'_, &'_ Constructor> {
             f.write_fmt(format_args!(" {}", CrcCtx(field, self.1)))?;
         }
 
-        f.write_fmt(format_args!(" = {}", CrcCtx(&self.0.output_type.0, self.1)))?;
-        for ty in &self.0.output_type.1 {
+        f.write_fmt(format_args!(" = {}", CrcCtx(&self.0.output_type, self.1)))?;
+        for ty in &self.0.output_type_args {
             f.write_fmt(format_args!(" {}", CrcCtx(ty, self.1)))?;
         }
 

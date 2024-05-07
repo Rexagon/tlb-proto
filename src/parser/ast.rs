@@ -20,7 +20,9 @@ pub struct Constructor {
     /// Field groups.
     pub fields: Vec<FieldGroupItem>,
     /// Output type.
-    pub output_type: (Symbol, Vec<TypeExpr>),
+    pub output_type: Symbol,
+    /// Type arguments for the output type.
+    pub output_type_args: Vec<TypeExpr>,
 }
 
 /// Object constructor tag.
