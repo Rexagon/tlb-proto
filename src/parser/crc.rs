@@ -96,6 +96,30 @@ impl std::fmt::Display for CrcCtx<'_, &'_ ConstraintExpr> {
     }
 }
 
+impl std::fmt::Display for CrcCtx<'_, &'_ ConstraintOperand> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.0 {
+            ConstraintOperand::Field(x) => std::fmt::Display::fmt(&CrcCtx(x, self.1), f),
+            ConstraintOperand::Const(x) => std::fmt::Display::fmt(x, f),
+            ConstraintOperand::Neg(x) => {
+                f.write_fmt(format_args!("~{}", CrcCtx(x.as_ref(), self.1)))
+            }
+            ConstraintOperand::Expr(x) => std::fmt::Display::fmt(&CrcCtx(x.as_ref(), self.1), f),
+        }
+    }
+}
+
+impl std::fmt::Display for CrcCtx<'_, &'_ ConstraintOperandExpr> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_fmt(format_args!(
+            "{} {} {}",
+            CrcCtx(&self.0.left, self.1),
+            self.0.op,
+            CrcCtx(&self.0.right, self.1)
+        ))
+    }
+}
+
 impl std::fmt::Display for CrcCtx<'_, &'_ Field> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         if let Some(name) = &self.0.ident {
@@ -126,6 +150,7 @@ impl std::fmt::Display for CrcCtx<'_, &'_ TypeExpr> {
                 Ok(())
             }
             TypeExpr::ChildCell(x) => f.write_fmt(format_args!("^{}", CrcCtx(x.as_ref(), self.1))),
+            TypeExpr::Neg(x) => f.write_fmt(format_args!("~{}", CrcCtx(x.as_ref(), self.1))),
         }
     }
 }
@@ -186,6 +211,7 @@ mod tests {
     fn check_tag(tlb: &str, tag: u32) {
         let mut ctx = Context::default();
         let constructor = Constructor::parse(&mut ctx, tlb).unwrap();
+        println!("{}", CrcCtx(&constructor, &ctx));
         assert_eq!(constructor.tag, Some(ConstructorTag::from(tag)));
     }
 
@@ -220,6 +246,13 @@ mod tests {
                 { other >= some } = WithGuard (x * 2);
             "###,
             0xd0bd258f,
+        );
+
+        check_tag(
+            r###"
+            hm_edge {n:#} {X:Type} {l:#} {m:#} label:(HmLabel ~l n) {n = (~m) + l} node:(HashmapNode m X) = Hashmap n X;
+            "###,
+            0x2002a049,
         );
     }
 }

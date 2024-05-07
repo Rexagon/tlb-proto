@@ -1,66 +1,82 @@
 WHITESPACE = _{ " " | NEWLINE }
-COMMENT = _{
-    ("//" ~ (!NEWLINE ~ ANY)*) |
-    ("/*" ~ (!"*/" ~ ANY)* ~ "*/")
+COMMENT    = _{
+    ("//" ~ (!NEWLINE ~ ANY)*)
+  | ("/*" ~ (!"*/" ~ ANY)* ~ "*/")
 }
 
-tlb_scheme = _{ SOI ~ (constructor ~ ";")* ~ EOI }
+tlb_scheme      = _{ SOI ~ (constructor ~ ";")* ~ EOI }
 tlb_constructor = _{ SOI ~ constructor ~ ";"? ~ EOI }
 
 constructor = { constructor_name ~ generic* ~ field_group_item* ~ "=" ~ output_type }
 
 // Constructor name
-constructor_name = { ("_" | lc_ident) ~ constructor_tag? }
-constructor_tag = _{
-	("$" ~ (constructor_tag_empty | constructor_tag_binary)) |
-    ("#" ~ (constructor_tag_empty | constructor_tag_hex))
+constructor_name       =  { ("_" | lc_ident) ~ constructor_tag? }
+constructor_tag        = _{
+    ("$" ~ (constructor_tag_empty | constructor_tag_binary))
+  | ("#" ~ (constructor_tag_empty | constructor_tag_hex))
 }
 constructor_tag_binary = @{ ident_char+ }
-constructor_tag_hex = @{ ident_char+ }
-constructor_tag_empty = @{ "_" }
+constructor_tag_hex    = @{ ident_char+ }
+constructor_tag_empty  = @{ "_" }
 
 // Named type argument
 generic = { "{" ~ ident ~ ":" ~ (nat_type | type) ~ "}" }
 
 // Field or constraint or a group of fields in a child cell
 field_group_item = {
-    (("_" ~ ":")? ~ "^[" ~ field_group_item+ ~ "]") |
-    field |
-    constraint_expr
+    (("_" ~ ":")? ~ "^[" ~ field_group_item+ ~ "]")
+  | field
+  | constraint_expr
 }
 // Field with name or unnamed
 field = { (("_" | ident) ~ ":" ~ field_condition?)? ~ type_expr }
 // Optional field which is set only if the specified bit is set
 field_condition = { ident ~ "." ~ nat_const ~ "?" }
 // Constraint expression
-constraint_expr = { "{" ~ ident ~ constraint_expr_operator ~ (nat_const | ident) ~ "}" }
+constraint_expr = { "{" ~ constraint_operand ~ constraint_op ~ constraint_operand ~ "}" }
 // Comparison operator for constraint expression
-constraint_expr_operator = @{ "<=" | "<" | "=" | ">=" | ">" }
+constraint_op             = @{ "<=" | "<" | "=" | ">=" | ">" }
+constraint_operand        =  {
+    constraint_operand_expr
+  | constraint_operand_single
+}
+constraint_operand_single = _{
+    nat_const
+  | ident
+  | neg_constraint_operand
+  | ("(" ~ constraint_operand ~ ")")
+}
+constraint_operand_expr   =  { constraint_operand_single ~ nat_op ~ constraint_operand_single }
+neg_constraint_operand    =  { "~" ~ constraint_operand }
 
 // Output type with type parameters substitution
 output_type = { uc_ident ~ type_expr* }
-
 
 // Type-level type
 type = @{ "Type" }
 
 // Type expression
-type_expr = {
-    nat_const |
-    nat_type |
-    ident |
-    type_in_cell |
-    ( "(" ~ (nat_type_width | nat_type_leq | nat_type_less) ~ ")" ) |
-    ( "(" ~ nat_expr ~ ")" ) |
-    ( "(" ~ ident ~ type_expr* ~ ")" )
+type_expr     = {
+    nat_expr
+  | nat_const
+  | nat_type_width
+  | nat_type_leq
+  | nat_type_less
+  | nat_type
+  | ident
+  | ("(" ~ ident ~ type_expr+ ~ ")")
+  | type_in_cell
+  | neg_type_expr
+  | ("(" ~ type_expr ~ ")")
 }
+neg_type_expr = { "~" ~ type_expr }
 // Type serialized in a child cell
 type_in_cell = { "^" ~ type_expr }
 
 // Expression with integer value
-nat_expr = { ident ~ nat_expr_operator ~ (nat_const | ident) }
+nat_expr = { ident ~ nat_op ~ (nat_const | ident) }
 // Operator for idents with nat consts
-nat_expr_operator = @{ "+" | "-" | "*" }
+nat_op = @{ "+" | "-" | "*" }
 
 // Alias to uint32
 nat_type = @{ "#" }

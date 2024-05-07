@@ -2,6 +2,7 @@ use std::num::NonZeroU8;
 
 use pest::iterators::{Pair, Pairs};
 use pest::Parser;
+use string_interner::backend::DefaultBackend;
 use string_interner::StringInterner;
 
 use self::ast::*;
@@ -16,7 +17,7 @@ mod symbol;
 
 #[derive(Default)]
 pub struct Context {
-    interner: StringInterner,
+    interner: StringInterner<DefaultBackend>,
 }
 
 impl Context {
@@ -240,54 +241,61 @@ fn parse_output_type(
 fn parse_type_expr(ctx: &mut Context, pair: Pair<'_, Rule>) -> Result<TypeExpr, ParserError> {
     let mut pairs = pair.into_inner();
 
-    let pair = pairs.next().unwrap();
-    Ok(match pair.as_rule() {
-        Rule::nat_const => {
-            let value = pair
-                .as_str()
-                .parse()
-                .map_err(ParserError::InvalidNatConst)?;
-            TypeExpr::Const(value)
-        }
-        Rule::nat_type => TypeExpr::Nat,
-        Rule::nat_type_width => TypeExpr::AltNat(AltNat::Width(parse_nat_value(
-            ctx,
-            pair.into_inner().next().unwrap(),
-        )?)),
-        Rule::nat_type_leq => TypeExpr::AltNat(AltNat::Leq(parse_nat_value(
-            ctx,
-            pair.into_inner().next().unwrap(),
-        )?)),
-        Rule::nat_type_less => TypeExpr::AltNat(AltNat::Less(parse_nat_value(
-            ctx,
-            pair.into_inner().next().unwrap(),
-        )?)),
-        Rule::nat_expr => TypeExpr::NatExpr(parse_nat_expr(ctx, pair)?),
-        Rule::ident => {
-            let mut types = Vec::new();
-            for pair in pairs {
-                types.push(parse_type_expr(ctx, pair)?);
+    let mut pair = pairs.next().unwrap();
+    loop {
+        let type_expr = match pair.as_rule() {
+            Rule::type_expr => {
+                pair = pair.into_inner().next().unwrap();
+                continue;
             }
-            TypeExpr::Ident(ctx.make_symbol(&pair), types)
-        }
-        Rule::type_in_cell => {
-            let inner = pair.into_inner().next().unwrap();
-            TypeExpr::ChildCell(Box::new(parse_type_expr(ctx, inner)?))
-        }
-        _ => unreachable!(),
-    })
+            Rule::nat_const => {
+                let value = pair
+                    .as_str()
+                    .parse()
+                    .map_err(ParserError::InvalidNatConst)?;
+                TypeExpr::Const(value)
+            }
+            Rule::nat_type => TypeExpr::Nat,
+            Rule::nat_type_width => TypeExpr::AltNat(AltNat::Width(parse_nat_value(
+                ctx,
+                pair.into_inner().next().unwrap(),
+            )?)),
+            Rule::nat_type_leq => TypeExpr::AltNat(AltNat::Leq(parse_nat_value(
+                ctx,
+                pair.into_inner().next().unwrap(),
+            )?)),
+            Rule::nat_type_less => TypeExpr::AltNat(AltNat::Less(parse_nat_value(
+                ctx,
+                pair.into_inner().next().unwrap(),
+            )?)),
+            Rule::nat_expr => TypeExpr::NatExpr(parse_nat_expr(ctx, pair)?),
+            Rule::ident => {
+                let mut types = Vec::new();
+                for pair in pairs {
+                    types.push(parse_type_expr(ctx, pair)?);
+                }
+                TypeExpr::Ident(ctx.make_symbol(&pair), types)
+            }
+            Rule::type_in_cell => {
+                let inner = pair.into_inner().next().unwrap();
+                TypeExpr::ChildCell(Box::new(parse_type_expr(ctx, inner)?))
+            }
+            Rule::neg_type_expr => {
+                let inner = pair.into_inner().next().unwrap();
+                TypeExpr::Neg(Box::new(parse_type_expr(ctx, inner)?))
+            }
+            e => unreachable!("{e:?}"),
+        };
+
+        break Ok(type_expr);
+    }
 }
 
 fn parse_nat_expr(ctx: &mut Context, pair: Pair<'_, Rule>) -> Result<NatExpr, ParserError> {
     let mut pairs = pair.into_inner();
 
     let left = parse_nat_value(ctx, pairs.next().unwrap())?;
-    let op = match pairs.next().unwrap().as_str() {
-        "+" => NatOperator::Add,
-        "-" => NatOperator::Sub,
-        "*" => NatOperator::Mul,
-        _ => return Err(ParserError::UnknownOperator),
-    };
+    let op = parse_nat_op(pairs.next().unwrap())?;
     let right = parse_nat_value(ctx, pairs.next().unwrap())?;
 
     Ok(NatExpr { left, right, op })
@@ -299,7 +307,7 @@ fn parse_constraint_expr(
 ) -> Result<ConstraintExpr, ParserError> {
     let mut pairs = pair.into_inner();
 
-    let left = parse_nat_value(ctx, pairs.next().unwrap())?;
+    let left = parse_constraint_operand(ctx, pairs.next().unwrap())?;
     let op = match pairs.next().unwrap().as_str() {
         "<" => ConstraintOperator::Lt,
         "<=" => ConstraintOperator::Le,
@@ -308,9 +316,43 @@ fn parse_constraint_expr(
         ">" => ConstraintOperator::Gt,
         _ => return Err(ParserError::UnknownOperator),
     };
-    let right = parse_nat_value(ctx, pairs.next().unwrap())?;
+    let right = parse_constraint_operand(ctx, pairs.next().unwrap())?;
 
     Ok(ConstraintExpr { left, right, op })
+}
+
+fn parse_constraint_operand(
+    ctx: &mut Context,
+    mut pair: Pair<'_, Rule>,
+) -> Result<ConstraintOperand, ParserError> {
+    loop {
+        let operand = match pair.as_rule() {
+            Rule::constraint_operand => {
+                pair = pair.into_inner().next().unwrap();
+                continue;
+            }
+            Rule::ident => ConstraintOperand::Field(ctx.make_symbol(&pair)),
+            Rule::nat_const => pair
+                .as_str()
+                .parse()
+                .map(ConstraintOperand::Const)
+                .map_err(ParserError::InvalidNatConst)?,
+            Rule::neg_constraint_operand => {
+                let inner = pair.into_inner().next().unwrap();
+                ConstraintOperand::Neg(Box::new(parse_constraint_operand(ctx, inner)?))
+            }
+            Rule::constraint_operand_expr => {
+                let mut pairs = pair.into_inner();
+                let left = parse_constraint_operand(ctx, pairs.next().unwrap())?;
+                let op = parse_nat_op(pairs.next().unwrap())?;
+                let right = parse_constraint_operand(ctx, pairs.next().unwrap())?;
+                ConstraintOperand::Expr(Box::new(ConstraintOperandExpr { left, right, op }))
+            }
+            _ => unreachable!(),
+        };
+
+        break Ok(operand);
+    }
 }
 
 fn parse_nat_value(ctx: &mut Context, pair: Pair<'_, Rule>) -> Result<NatValue, ParserError> {
@@ -322,6 +364,15 @@ fn parse_nat_value(ctx: &mut Context, pair: Pair<'_, Rule>) -> Result<NatValue, 
             .map(NatValue::Const)
             .map_err(ParserError::InvalidNatConst),
         _ => unreachable!(),
+    }
+}
+
+fn parse_nat_op(pair: Pair<'_, Rule>) -> Result<NatOperator, ParserError> {
+    match pair.as_str() {
+        "+" => Ok(NatOperator::Add),
+        "-" => Ok(NatOperator::Sub),
+        "*" => Ok(NatOperator::Mul),
+        _ => Err(ParserError::UnknownOperator),
     }
 }
 
@@ -403,6 +454,31 @@ mod tests {
             workchain_id:int32 address:(bits addr_len) = MsgAddressInt;
             _ _:MsgAddressInt = MsgAddress;
             _ _:MsgAddressExt = MsgAddress;
+            "####,
+        );
+    }
+
+    #[test]
+    fn scheme_with_resolved_args() {
+        check_scheme(
+            r####"
+            bit#_ _:(## 1) = Bit;
+
+            // ordinary Hashmap / HashmapE, with fixed length keys
+            //
+            hm_edge#_ {n:#} {X:Type} {l:#} {m:#} label:(HmLabel ~l n)
+                    {n = (~m) + l} node:(HashmapNode m X) = Hashmap n X;
+
+            hmn_leaf#_ {X:Type} value:X = HashmapNode 0 X;
+            hmn_fork#_ {n:#} {X:Type} left:^(Hashmap n X)
+                    right:^(Hashmap n X) = HashmapNode (n + 1) X;
+
+            hml_short$0 {m:#} {n:#} len:(Unary ~n) s:(n * Bit) = HmLabel ~n m;
+            hml_long$10 {m:#} n:(#<= m) s:(n * Bit) = HmLabel ~n m;
+            hml_same$11 {m:#} v:Bit n:(#<= m) = HmLabel ~n m;
+
+            unary_zero$0 = Unary ~0;
+            unary_succ$1 {n:#} x:(Unary ~n) = Unary ~(n + 1);
             "####,
         );
     }

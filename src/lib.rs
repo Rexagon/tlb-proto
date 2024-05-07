@@ -1,3 +1,3 @@
-pub mod generator;
+pub mod types;
 pub mod parser;
 pub mod util;

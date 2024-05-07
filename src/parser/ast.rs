@@ -32,6 +32,19 @@ pub struct ConstructorTag {
     pub value: u32,
 }
 
+impl ConstructorTag {
+    pub fn into_prefix(self) -> u64 {
+        self.as_prefix()
+    }
+
+    pub fn as_prefix(&self) -> u64 {
+        let bits = self.bits.get();
+        let prefix = (self.value as u64) << (32 - bits);
+        let termination_bit = 1 << (bits - 1);
+        prefix | termination_bit
+    }
+}
+
 impl From<u32> for ConstructorTag {
     fn from(value: u32) -> Self {
         Self {
@@ -140,6 +153,13 @@ pub enum TypeExpr {
     /// test field:^(## 64) = Test;
     /// ```
     ChildCell(Box<TypeExpr>),
+    /// Negated type expression.
+    ///
+    /// ```text
+    /// unary_zero$0 = Unary ~0;
+    /// unary_succ$1 {n:#} = Unary ~(n + 1);
+    /// ```
+    Neg(Box<TypeExpr>),
 }
 
 /// Integer with explicit bit representation.
@@ -201,15 +221,39 @@ impl std::fmt::Display for NatOperator {
     }
 }
 
-/// Constraint expression used to add checks to the parsed fields.
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+/// Constraint expression used to add checks and dependencies to the parsed fields.
+#[derive(Debug, Clone, Eq, PartialEq)]
 pub struct ConstraintExpr {
-    /// Type or field identifier.
-    pub left: NatValue,
-    /// Type or field identifier.
-    pub right: NatValue,
+    /// Left operand.
+    pub left: ConstraintOperand,
+    /// Right operand.
+    pub right: ConstraintOperand,
     /// Comparison operator.
     pub op: ConstraintOperator,
+}
+
+/// Constraint expression operand.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub enum ConstraintOperand {
+    /// Field identifier.
+    Field(Symbol),
+    /// Integer constant.
+    Const(u32),
+    /// Negated operand.
+    Neg(Box<ConstraintOperand>),
+    /// Expression with two operands.
+    Expr(Box<ConstraintOperandExpr>),
+}
+
+/// Simple expression with constraint operands.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct ConstraintOperandExpr {
+    /// Left value.
+    pub left: ConstraintOperand,
+    /// Right value.
+    pub right: ConstraintOperand,
+    /// Binary operator.
+    pub op: NatOperator,
 }
 
 /// Comparison operator used in constraint expression.
