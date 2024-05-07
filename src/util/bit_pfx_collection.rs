@@ -66,7 +66,7 @@ impl BitPfxCollection {
         for i in 0..self.items.len() {
             let mut item = self.items[i];
 
-            // Ger tag from the item
+            // Get tag from the item
             let tag = lower_bit(item);
             // Prepend item with the prefix
             item = prefix | (item >> prefix_len);

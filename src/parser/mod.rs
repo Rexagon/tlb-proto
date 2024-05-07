@@ -49,7 +49,6 @@ impl Constructor {
     pub fn parse(ctx: &mut Context, s: &str) -> Result<Self, ParserError> {
         let constructor = Grammar::parse(Rule::tlb_constructor, s)
             .map_err(|e| ParserError::InvalidInput(Box::new(e)))?
-            .into_iter()
             .next()
             .unwrap();
         parse_constructor(ctx, constructor)

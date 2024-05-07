@@ -52,7 +52,7 @@ impl ConflictSet {
         self.0.count_ones() as usize
     }
 
-    pub fn insert(&mut self, tag: u64) {
+    pub fn insert(&mut self, tag: u8) {
         if tag < 64 {
             self.0 |= 1 << tag;
         }
