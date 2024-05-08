@@ -16,6 +16,35 @@ impl<'a> Context<'a> {
         }
     }
 
+    fn import_builtin_types(&mut self) -> Result<(), ImportError> {
+        self.add_builtin_type("#", &[], SizeRange::bits(32..=32))?;
+        self.add_builtin_type("##", &["#"], SizeRange::bits(0..=32))?;
+        self.add_builtin_type("#<", &["#"], SizeRange::bits(0..=32))?;
+        self.add_builtin_type("#<=", &["#"], SizeRange::bits(0..=32))?;
+
+        self.add_builtin_type("Any", &[], SizeRange::any())?;
+        self.add_builtin_type("Cell", &[], SizeRange::exact_refs(1))?;
+
+        self.add_builtin_type("int", &["#"], SizeRange::bits(0..=257))?;
+        self.add_builtin_type("uint", &["#"], SizeRange::bits(0..=256))?;
+        self.add_builtin_type("bits", &["#"], SizeRange::bits(0..=1023))?;
+
+        for i in 0..=257 {
+            let name = format!("uint{i}");
+            self.add_builtin_type(&name[1..], &[], SizeRange::exact_bits(i))?;
+            if i <= 256 {
+                self.add_builtin_type(&name, &[], SizeRange::exact_bits(i))?;
+            }
+        }
+
+        for i in 0..=1023 {
+            let name = format!("bits{i}");
+            self.add_builtin_type(&name, &[], SizeRange::exact_bits(i))?;
+        }
+
+        Ok(())
+    }
+
     pub fn import(&mut self, constructors: &[ast::Constructor]) -> Result<(), ImportError> {
         // Group constructors by output type name
         let mut constructors_by_output =
@@ -45,6 +74,15 @@ impl<'a> Context<'a> {
             .get_symbol(name)
             .and_then(|symbol| self.get_type(symbol))
     }
+
+    fn add_builtin_type(
+        &mut self,
+        name: &str,
+        args: &[&str],
+        size: SizeRange,
+    ) -> Result<(), ImportError> {
+        todo!()
+    }
 }
 
 pub struct Type {
@@ -66,8 +104,6 @@ impl Type {
             starts_with.merge(&ctor.starts_with);
             constructors.push(ctor);
         }
-
-        // TODO
 
         Ok(Self {
             size,
@@ -102,6 +138,56 @@ impl Constructor {
             size,
             starts_with,
         })
+    }
+}
+
+enum TypeExpr {
+    Type,
+    Param {
+        ty: ast::GenericType,
+        index: usize,
+        negate: bool,
+    },
+    Apply {
+        name: Option<Symbol>,
+        applied: Rc<TypeExpr>,
+    },
+    Add {
+        left: Rc<TypeExpr>,
+        right: Rc<TypeExpr>,
+        negated: bool,
+    },
+    GetBit {
+        field: Rc<TypeExpr>,
+        bit: Rc<TypeExpr>,
+    },
+    MulConst {
+        left: Rc<TypeExpr>,
+        right: u32,
+        negated: bool,
+    },
+    IntConst {
+        value: u32,
+    },
+    Tuple {
+        count: Rc<TypeExpr>,
+        item: Rc<TypeExpr>,
+    },
+    Ref {
+        value: Rc<TypeExpr>,
+    },
+    CondType {
+        cond: Rc<TypeExpr>,
+        item: Rc<TypeExpr>,
+    },
+}
+
+impl TypeExpr {
+    fn new(ast: &ast::TypeExpr) -> Result<Self, ImportError> {
+        match ast {
+            &ast::TypeExpr::Const(value) => Ok(Self::IntConst { value }),
+            _ => unimplemented!(),
+        }
     }
 }
 

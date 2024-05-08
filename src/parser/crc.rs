@@ -36,16 +36,16 @@ impl std::fmt::Display for CrcCtx<'_, &'_ Constructor> {
         }
 
         for generic in &self.0.generics {
-            f.write_fmt(format_args!(" {}", CrcCtx(generic, self.1)))?;
+            write!(f, " {}", CrcCtx(generic, self.1))?;
         }
 
         for field in &self.0.fields {
-            f.write_fmt(format_args!(" {}", CrcCtx(field, self.1)))?;
+            write!(f, " {}", CrcCtx(field, self.1))?;
         }
 
-        f.write_fmt(format_args!(" = {}", CrcCtx(&self.0.output_type, self.1)))?;
+        write!(f, " = {}", CrcCtx(&self.0.output_type, self.1))?;
         for ty in &self.0.output_type_args {
-            f.write_fmt(format_args!(" {}", CrcCtx(ty, self.1)))?;
+            write!(f, " {}", CrcCtx(ty, self.1))?;
         }
 
         Ok(())
@@ -54,11 +54,7 @@ impl std::fmt::Display for CrcCtx<'_, &'_ Constructor> {
 
 impl std::fmt::Display for CrcCtx<'_, &'_ Generic> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_fmt(format_args!(
-            "{}:{}",
-            CrcCtx(&self.0.ident, self.1),
-            self.0.ty
-        ))
+        write!(f, "{}:{}", CrcCtx(&self.0.ident, self.1), self.0.ty)
     }
 }
 
@@ -68,55 +64,12 @@ impl std::fmt::Display for CrcCtx<'_, &'_ FieldGroupItem> {
             FieldGroupItem::ChildCell(x) => {
                 f.write_str("^[")?;
                 for field in x {
-                    f.write_fmt(format_args!(" {}", CrcCtx(field, self.1)))?;
+                    write!(f, " {}", CrcCtx(field, self.1))?;
                 }
                 f.write_str(" ]")
             }
             FieldGroupItem::Field(x) => std::fmt::Display::fmt(&CrcCtx(x, self.1), f),
-            FieldGroupItem::Constraint(x) => std::fmt::Display::fmt(&CrcCtx(x, self.1), f),
         }
-    }
-}
-
-impl std::fmt::Display for CrcCtx<'_, &'_ ConstraintExpr> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let (op, left, right) = match self.0.op {
-            op @ (ConstraintOperator::Lt | ConstraintOperator::Le | ConstraintOperator::Eq) => {
-                (op, &self.0.left, &self.0.right)
-            }
-            ConstraintOperator::Gt => (ConstraintOperator::Lt, &self.0.right, &self.0.left),
-            ConstraintOperator::Ge => (ConstraintOperator::Le, &self.0.right, &self.0.left),
-        };
-
-        f.write_fmt(format_args!(
-            "{op} {} {}",
-            CrcCtx(left, self.1),
-            CrcCtx(right, self.1)
-        ))
-    }
-}
-
-impl std::fmt::Display for CrcCtx<'_, &'_ ConstraintOperand> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self.0 {
-            ConstraintOperand::Field(x) => std::fmt::Display::fmt(&CrcCtx(x, self.1), f),
-            ConstraintOperand::Const(x) => std::fmt::Display::fmt(x, f),
-            ConstraintOperand::Neg(x) => {
-                f.write_fmt(format_args!("~{}", CrcCtx(x.as_ref(), self.1)))
-            }
-            ConstraintOperand::Expr(x) => std::fmt::Display::fmt(&CrcCtx(x.as_ref(), self.1), f),
-        }
-    }
-}
-
-impl std::fmt::Display for CrcCtx<'_, &'_ ConstraintOperandExpr> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_fmt(format_args!(
-            "{} {} {}",
-            CrcCtx(&self.0.left, self.1),
-            self.0.op,
-            CrcCtx(&self.0.right, self.1)
-        ))
     }
 }
 
@@ -135,58 +88,35 @@ impl std::fmt::Display for CrcCtx<'_, &'_ Field> {
 impl std::fmt::Display for CrcCtx<'_, &'_ TypeExpr> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match &self.0 {
-            TypeExpr::Const(x) => std::fmt::Display::fmt(x, f),
+            TypeExpr::Const { value } => std::fmt::Display::fmt(value, f),
             TypeExpr::Nat => f.write_str("#"),
-            TypeExpr::AltNat(x) => std::fmt::Display::fmt(&CrcCtx(x, self.1), f),
-            TypeExpr::NatExpr(x) => std::fmt::Display::fmt(&CrcCtx(x, self.1), f),
-            TypeExpr::Ident(x, generics) if generics.is_empty() => {
-                std::fmt::Display::fmt(&CrcCtx(x, self.1), f)
+            TypeExpr::AltNat { kind, arg } => {
+                write!(f, "{kind} {}", CrcCtx(arg.as_ref(), self.1))
             }
-            TypeExpr::Ident(x, generics) => {
-                std::fmt::Display::fmt(&CrcCtx(x, self.1), f)?;
-                for generic in generics {
-                    f.write_fmt(format_args!(" {}", CrcCtx(generic, self.1)))?;
+            TypeExpr::Add { left, right } => {
+                let left = CrcCtx(left.as_ref(), self.1);
+                let right = CrcCtx(right.as_ref(), self.1);
+                write!(f, "{left} + {right}")
+            }
+            TypeExpr::Mul { left, right } => {
+                let left = CrcCtx(left.as_ref(), self.1);
+                let right = CrcCtx(right.as_ref(), self.1);
+                write!(f, "{left} * {right}")
+            }
+            TypeExpr::Constraint { op, left, right } => {
+                let left = CrcCtx(left.as_ref(), self.1);
+                let right = CrcCtx(right.as_ref(), self.1);
+                write!(f, "{op} {left} {right}")
+            }
+            TypeExpr::Apply { ident, args } => {
+                std::fmt::Display::fmt(&CrcCtx(ident, self.1), f)?;
+                for arg in args {
+                    f.write_fmt(format_args!(" {}", CrcCtx(arg, self.1)))?;
                 }
                 Ok(())
             }
-            TypeExpr::ChildCell(x) => f.write_fmt(format_args!("^{}", CrcCtx(x.as_ref(), self.1))),
-            TypeExpr::Neg(x) => f.write_fmt(format_args!("~{}", CrcCtx(x.as_ref(), self.1))),
-        }
-    }
-}
-
-impl std::fmt::Display for CrcCtx<'_, &'_ NatExpr> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let (left, right) = match self.0.op {
-            NatOperator::Mul if self.0.right.is_const() => (&self.0.right, &self.0.left),
-            _ => (&self.0.left, &self.0.right),
-        };
-
-        f.write_fmt(format_args!(
-            "{} {} {}",
-            CrcCtx(left, self.1),
-            self.0.op,
-            CrcCtx(right, self.1)
-        ))
-    }
-}
-
-impl std::fmt::Display for CrcCtx<'_, &'_ AltNat> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let (name, value) = match &self.0 {
-            AltNat::Width(x) => ("##", x),
-            AltNat::Leq(x) => ("#<=", x),
-            AltNat::Less(x) => ("#<", x),
-        };
-        f.write_fmt(format_args!("{name} {}", CrcCtx(value, self.1)))
-    }
-}
-
-impl std::fmt::Display for CrcCtx<'_, &'_ NatValue> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match &self.0 {
-            NatValue::Const(x) => std::fmt::Display::fmt(x, f),
-            NatValue::Ident(x) => std::fmt::Display::fmt(&CrcCtx(x, self.1), f),
+            TypeExpr::Negate { ident } => write!(f, "~{}", CrcCtx(ident, self.1)),
+            TypeExpr::Ref(x) => write!(f, "^{}", CrcCtx(x.as_ref(), self.1)),
         }
     }
 }

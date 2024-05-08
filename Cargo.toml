@@ -5,6 +5,7 @@ edition = "2021"
 
 [dependencies]
 ahash = "0.8"
+chumsky = "1.0.0-alpha.7"
 crc = "3"
 pest = "2.7"
 pest_derive = "2.7"

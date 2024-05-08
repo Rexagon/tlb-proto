@@ -7,6 +7,76 @@ pub struct SizeRange {
 }
 
 impl SizeRange {
+    pub fn any() -> Self {
+        Self {
+            min: None,
+            max: None,
+        }
+    }
+
+    pub fn zero() -> Self {
+        Self {
+            min: Some(TypeSize::ZERO),
+            max: Some(TypeSize::ZERO),
+        }
+    }
+
+    pub fn exact_bits(bits: u16) -> Self {
+        Self {
+            min: Some(TypeSize { bits, refs: 0 }),
+            max: Some(TypeSize { bits, refs: 0 }),
+        }
+    }
+
+    pub fn bits(bits: impl std::ops::RangeBounds<u16>) -> Self {
+        Self {
+            min: {
+                let bits = match bits.start_bound() {
+                    std::ops::Bound::Included(&start) => start,
+                    std::ops::Bound::Excluded(&start) => start + 1,
+                    std::ops::Bound::Unbounded => 0,
+                };
+                Some(TypeSize { bits, refs: 0 })
+            },
+            max: {
+                let bits = match bits.end_bound() {
+                    std::ops::Bound::Included(&end) => Some(end),
+                    std::ops::Bound::Excluded(&end) => Some(end - 1),
+                    std::ops::Bound::Unbounded => None,
+                };
+                bits.map(|bits| TypeSize { bits, refs: 0 })
+            },
+        }
+    }
+
+    pub fn exact_refs(refs: u8) -> Self {
+        Self {
+            min: Some(TypeSize { bits: 0, refs }),
+            max: Some(TypeSize { bits: 0, refs }),
+        }
+    }
+
+    pub fn refs(refs: impl std::ops::RangeBounds<u8>) -> Self {
+        Self {
+            min: {
+                let refs = match refs.start_bound() {
+                    std::ops::Bound::Included(&start) => start,
+                    std::ops::Bound::Excluded(&start) => start + 1,
+                    std::ops::Bound::Unbounded => 0,
+                };
+                Some(TypeSize { bits: 0, refs })
+            },
+            max: {
+                let refs = match refs.end_bound() {
+                    std::ops::Bound::Included(&end) => Some(end),
+                    std::ops::Bound::Excluded(&end) => Some(end - 1),
+                    std::ops::Bound::Unbounded => None,
+                };
+                refs.map(|refs| TypeSize { bits: 0, refs })
+            },
+        }
+    }
+
     pub fn is_fixed(&self) -> bool {
         self.min == self.max
     }

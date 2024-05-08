@@ -1,6 +1,27 @@
+//! ```text
+//! constructor = ( ident | _ ) field-list = Ident ( T )* ;
+//!
+//! T = ( E ) | [ {field-def} ] | id | ~id | num | ^T
+//!
+//! expr97 = T[.T]
+//! expr95 = expr97 ? T
+//! expr90 = expr90 * expr90
+//! expr20 = expr30 + expr30
+//! expr10 = expr20 | expr20 = expr20 | expr20 < expr20 | expr20 <= expr20 | ...
+//! E = expr10
+//!
+//! type-expr = expr95
+//!
+//! field-list = ( { implicit-param } | { constraint } | param )*
+//!
+//! constraint = expr
+//! implicit-param = ident : # | ident : Type
+//! param = [ ( ident | _ ) : ] type-expr
+//! ```
+
 use std::num::NonZeroU8;
 
-use crate::parser::Symbol;
+use crate::parser::{Span, Symbol};
 
 #[derive(Debug, Clone)]
 pub struct Scheme {
@@ -11,16 +32,16 @@ pub struct Scheme {
 /// Object declaration.
 #[derive(Debug, Clone)]
 pub struct Constructor {
+    /// Source location.
+    pub span: Span,
     /// Optional constructor name.
-    pub name: Option<Symbol>,
+    pub name: Option<Name>,
     /// Constructor tag.
     pub tag: Option<ConstructorTag>,
-    /// Type arguments.
-    pub generics: Vec<Generic>,
     /// Field groups.
-    pub fields: Vec<FieldGroupItem>,
+    pub fields: Vec<Field>,
     /// Output type.
-    pub output_type: Symbol,
+    pub output_type: Name,
     /// Type arguments for the output type.
     pub output_type_args: Vec<TypeExpr>,
 }
@@ -28,6 +49,8 @@ pub struct Constructor {
 /// Object constructor tag.
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct ConstructorTag {
+    /// Source location.
+    pub span: Span,
     /// Constructor length in bits.
     pub bits: NonZeroU8,
     /// Constructor value.
@@ -45,24 +68,6 @@ impl ConstructorTag {
         let termination_bit = 1 << (bits - 1);
         prefix | termination_bit
     }
-}
-
-impl From<u32> for ConstructorTag {
-    fn from(value: u32) -> Self {
-        Self {
-            bits: NonZeroU8::new(32).unwrap(),
-            value,
-        }
-    }
-}
-
-/// Object type argument.
-#[derive(Debug, Clone, Eq, PartialEq)]
-pub struct Generic {
-    /// Type argument name.
-    pub ident: Symbol,
-    /// Argument type.
-    pub ty: GenericType,
 }
 
 /// Generic argument type.
@@ -83,35 +88,31 @@ impl std::fmt::Display for GenericType {
     }
 }
 
-/// Object field group item.
-#[derive(Debug, Clone, Eq, PartialEq)]
-pub enum FieldGroupItem {
-    /// Object field.
-    Field(Field),
-    /// Field constraint used to check field values.
-    Constraint(ConstraintExpr),
-    /// A group of fields in the child cell.
-    ChildCell(Vec<FieldGroupItem>),
-}
-
 /// Object field.
-#[derive(Debug, Clone, Eq, PartialEq)]
-pub struct Field {
-    /// Optional field name.
-    pub ident: Option<Symbol>,
-    /// Optional field condition.
-    pub condition: Option<FieldCondition>,
-    /// Field type.
-    pub ty: TypeExpr,
-}
-
-/// Flags bit and identifier for conditional fields.
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
-pub struct FieldCondition {
-    /// Identifier of the numeric field with flags.
-    pub ident: Symbol,
-    /// Bit number in the flags field.
-    pub bit: u16,
+#[derive(Debug, Clone)]
+pub enum Field {
+    ImplicitParam {
+        /// Source location.
+        span: Span,
+        /// Type argument name.
+        ident: Symbol,
+        /// Argument type.
+        ty: GenericType,
+    },
+    Constraint {
+        /// Source location.
+        span: Span,
+        /// Constraint expression.
+        expr: Box<TypeExpr>,
+    },
+    Param {
+        /// Source location.
+        span: Span,
+        /// Optional field name.
+        ident: Option<Name>,
+        /// Field type.
+        ty: Box<TypeExpr>,
+    },
 }
 
 /// Type expression.
@@ -122,13 +123,13 @@ pub enum TypeExpr {
     /// ```text
     /// test field:123 = Test;
     /// ```
-    Const(u32),
+    Const { span: Span, value: u32 },
     /// 32-bit unsigned integer type.
     ///
     /// ```text
     /// test field:# = Test;
     /// ```
-    Nat,
+    Nat { span: Span },
     /// Unsigned integer type with bits info.
     ///
     /// ```text
@@ -136,151 +137,141 @@ pub enum TypeExpr {
     /// test field:(#<= 10) = Test;
     /// test field:(#< 10) = Test;
     /// ```
-    AltNat(AltNat),
-    /// Expression with integer values.
+    AltNat { span: Span, kind: AltNat, arg: u32 },
+    /// Addition expression with integer values.
     ///
     /// ```text
     /// test {n:#} field:(n + 1) = Test;
     /// ```
-    NatExpr(NatExpr),
+    Add {
+        span: Span,
+        left: Box<TypeExpr>,
+        right: Box<TypeExpr>,
+    },
+    /// Multiplication expression with integer values.
+    ///
+    /// ```text
+    /// test {n:#} field:(n * Bit) = Test;
+    /// ```
+    Mul {
+        span: Span,
+        left: Box<TypeExpr>,
+        right: Box<TypeExpr>,
+    },
+    /// A constraint expression.
+    ///
+    /// ```text
+    /// test flags:(## 8) { flags <= 1 } = Test;
+    /// ```
+    Constraint {
+        span: Span,
+        op: ConstraintOp,
+        left: Box<TypeExpr>,
+        right: Box<TypeExpr>,
+    },
+    /// Conditional field.
+    ///
+    /// ```text
+    /// test cond:(## 1) field:cond?Cell = BlockInfo;
+    /// ```
+    Cond {
+        span: Span,
+        cond: Box<TypeExpr>,
+        value: Box<TypeExpr>,
+    },
+    /// Get bit from the field.
+    ///
+    /// ```text
+    /// test flags:(## 8) field:flags.0?Cell = BlockInfo;
+    /// ```
+    GetBit {
+        span: Span,
+        value: Box<TypeExpr>,
+        bit: Box<TypeExpr>,
+    },
     /// Type identifier with type parameters.
     ///
     /// ```text
     /// test {X:Type} field:(HashMap 64 X) = Test;
     /// ```
-    Ident(Symbol, Vec<TypeExpr>),
+    Apply {
+        span: Span,
+        ident: Symbol,
+        args: Vec<TypeExpr>,
+    },
+    /// Negated field.
+    Negate { span: Span, ident: Symbol },
     /// Type serialized into a separate cell.
     ///
     /// ```text
     /// test field:^(## 64) = Test;
     /// ```
-    ChildCell(Box<TypeExpr>),
-    /// Negated type expression.
-    ///
-    /// ```text
-    /// unary_zero$0 = Unary ~0;
-    /// unary_succ$1 {n:#} = Unary ~(n + 1);
-    /// ```
-    Neg(Box<TypeExpr>),
+    Ref(Box<TypeExpr>),
+}
+
+impl TypeExpr {
+    pub fn span(&self) -> Span {
+        match self {
+            Self::Const { span, .. }
+            | Self::Nat { span, .. }
+            | Self::AltNat { span, .. }
+            | Self::Add { span, .. }
+            | Self::Mul { span, .. }
+            | Self::Constraint { span, .. }
+            | Self::Cond { span, .. }
+            | Self::GetBit { span, .. }
+            | Self::Apply { span, .. }
+            | Self::Negate { span, .. } => *span,
+            Self::Ref(x) => x.span(),
+        }
+    }
 }
 
 /// Integer with explicit bit representation.
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum AltNat {
     /// Integer with the fixed number of bits, `(## n)`.
-    Width(NatValue),
+    Width,
     /// Integer with at most the specified number of bits, `(#<= n)`.
-    Leq(NatValue),
+    Leq,
     /// Integer with less bits than specified, `(#< n)`.
-    Less(NatValue),
+    Less,
 }
 
-/// Integer value.
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
-pub enum NatValue {
-    /// Integer constant.
-    Const(u32),
-    /// Type or field identifier.
-    Ident(Symbol),
-}
-
-impl NatValue {
-    /// Returns `true` if the value is constant.
-    pub fn is_const(&self) -> bool {
-        matches!(self, Self::Const(_))
-    }
-}
-
-/// Simple expression with integer operands.
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
-pub struct NatExpr {
-    /// Type or field identifier.
-    pub left: NatValue,
-    /// Type or field identifier.
-    pub right: NatValue,
-    /// Binary operator.
-    pub op: NatOperator,
-}
-
-/// Binary operator for integers.
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
-pub enum NatOperator {
-    /// `+`
-    Add,
-    /// `-`
-    Sub,
-    /// `*`
-    Mul,
-}
-
-impl std::fmt::Display for NatOperator {
+impl std::fmt::Display for AltNat {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
-            Self::Add => "+",
-            Self::Sub => "-",
-            Self::Mul => "*",
+            Self::Width => "##",
+            Self::Leq => "#<=",
+            Self::Less => "#<",
         })
     }
 }
 
-/// Constraint expression used to add checks and dependencies to the parsed fields.
-#[derive(Debug, Clone, Eq, PartialEq)]
-pub struct ConstraintExpr {
-    /// Left operand.
-    pub left: ConstraintOperand,
-    /// Right operand.
-    pub right: ConstraintOperand,
-    /// Comparison operator.
-    pub op: ConstraintOperator,
-}
-
-/// Constraint expression operand.
-#[derive(Debug, Clone, Eq, PartialEq)]
-pub enum ConstraintOperand {
-    /// Field identifier.
-    Field(Symbol),
-    /// Integer constant.
-    Const(u32),
-    /// Negated operand.
-    Neg(Box<ConstraintOperand>),
-    /// Expression with two operands.
-    Expr(Box<ConstraintOperandExpr>),
-}
-
-/// Simple expression with constraint operands.
-#[derive(Debug, Clone, Eq, PartialEq)]
-pub struct ConstraintOperandExpr {
-    /// Left value.
-    pub left: ConstraintOperand,
-    /// Right value.
-    pub right: ConstraintOperand,
-    /// Binary operator.
-    pub op: NatOperator,
-}
-
 /// Comparison operator used in constraint expression.
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
-pub enum ConstraintOperator {
+pub enum ConstraintOp {
     /// `<`
     Lt,
     /// `<=`
     Le,
     /// `=`
     Eq,
-    /// `>=`
-    Ge,
-    /// `>`
-    Gt,
 }
 
-impl std::fmt::Display for ConstraintOperator {
+impl std::fmt::Display for ConstraintOp {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
             Self::Lt => "<",
             Self::Le => "<=",
             Self::Eq => "=",
-            Self::Ge => ">=",
-            Self::Gt => ">",
         })
     }
+}
+
+/// Identifier with source location.
+#[derive(Debug, Clone, Copy)]
+pub struct Name {
+    pub ident: Symbol,
+    pub span: Span,
 }

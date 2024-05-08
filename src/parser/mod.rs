@@ -1,19 +1,15 @@
-use std::num::NonZeroU8;
+use chumsky::extra;
+use chumsky::prelude::*;
+use chumsky::util::MaybeRef;
+use string_interner::{DefaultBackend, StringInterner};
 
-use pest::iterators::{Pair, Pairs};
-use pest::Parser;
-use string_interner::backend::DefaultBackend;
-use string_interner::StringInterner;
-
-use self::ast::*;
-use self::crc::compute_tag;
-use self::grammar::{Grammar, Rule};
-pub use self::symbol::Symbol;
+use self::symbol::Symbol;
 
 pub mod ast;
-mod crc;
-mod grammar;
+// mod crc;
 mod symbol;
+
+pub type Span = SimpleSpan<usize>;
 
 #[derive(Default)]
 pub struct Context {
@@ -29,462 +25,461 @@ impl Context {
         self.interner.resolve(symbol.into())
     }
 
-    pub fn make_symbol(&mut self, pair: &Pair<'_, Rule>) -> Symbol {
-        self.interner.get_or_intern(pair.as_str()).into()
+    pub fn intern_symbol<T: AsRef<str>>(&mut self, string: T) -> Symbol {
+        self.interner.get_or_intern(string).into()
     }
 }
 
-impl Scheme {
-    pub fn parse(ctx: &mut Context, s: &str) -> Result<Self, ParserError> {
-        let pairs = Grammar::parse(Rule::tlb_scheme, s)
-            .map_err(|e| ParserError::InvalidInput(Box::new(e)))?;
-
-        let mut declarations = Vec::new();
-        for pair in pairs {
-            if pair.as_rule() == Rule::constructor {
-                declarations.push(parse_constructor(ctx, pair)?);
-            }
-        }
-
-        Ok(Self { declarations })
+impl ast::Scheme {
+    pub fn parse(ctx: &mut Context, input: &str) -> Result<Self, Vec<ParserError>> {
+        scheme().parse_with_state(input, ctx).into_result()
     }
 }
 
-impl Constructor {
-    pub fn parse(ctx: &mut Context, s: &str) -> Result<Self, ParserError> {
-        let constructor = Grammar::parse(Rule::tlb_constructor, s)
-            .map_err(|e| ParserError::InvalidInput(Box::new(e)))?
-            .next()
-            .unwrap();
-        parse_constructor(ctx, constructor)
+impl ast::Constructor {
+    pub fn parse(ctx: &mut Context, input: &str) -> Result<Self, Vec<ParserError>> {
+        constructor().parse_with_state(input, ctx).into_result()
     }
 }
 
-fn parse_constructor(ctx: &mut Context, pair: Pair<'_, Rule>) -> Result<Constructor, ParserError> {
-    let mut pairs = pair.into_inner();
-
-    let (name, tag) = {
-        let pair = pairs.next().unwrap();
-        parse_constructor_name(ctx, pair)?
-    };
-
-    let mut generics = Vec::new();
-    read_same_rules(&mut pairs, Rule::generic, |pair| {
-        generics.push(parse_type_arg(ctx, pair)?);
-        Ok(())
-    })?;
-
-    let mut fields = Vec::new();
-    read_same_rules(&mut pairs, Rule::field_group_item, |pair| {
-        fields.push(parse_field_group_item(ctx, pair)?);
-        Ok(())
-    })?;
-
-    let (output_type, output_type_args) = {
-        let pair = pairs.next().unwrap();
-        parse_output_type(ctx, pair)?
-    };
-
-    let (tag, should_compute) = match tag {
-        ParsedConstructorTag::Explicit(tag) => (tag, false),
-        ParsedConstructorTag::Implicit => (None, name.is_some()),
-    };
-
-    let mut result = Constructor {
-        name,
-        tag,
-        generics,
-        fields,
-        output_type,
-        output_type_args,
-    };
-
-    if should_compute {
-        result.tag = Some(compute_tag(ctx, &result));
-    }
-
-    Ok(result)
+fn scheme<'a>() -> impl Parser<'a, &'a str, ast::Scheme, State> + Clone {
+    constructor()
+        .recover_with(skip_then_retry_until(any().ignored(), text::newline()))
+        .padded()
+        .repeated()
+        .collect()
+        .map(|items| ast::Scheme {
+            declarations: items,
+        })
 }
 
-fn parse_constructor_name(
-    ctx: &mut Context,
-    pair: Pair<'_, Rule>,
-) -> Result<(Option<Symbol>, ParsedConstructorTag), ParserError> {
-    let mut pairs = pair.into_inner().peekable();
+fn constructor<'a>() -> impl Parser<'a, &'a str, ast::Constructor, State> + Clone {
+    let term = term();
 
-    let mut name = None;
-    if let Some(next) = pairs.peek() {
-        if next.as_rule() == Rule::lc_ident {
-            name = Some(ctx.make_symbol(next));
-            pairs.next();
-        }
-    }
+    let name_opt =
+        choice((just('_').to(None), name(IdentType::Lowercase).map(Some))).then(tag().or_not());
+    let fields = field_list(term.clone());
 
-    let constructor_tag = if let Some(next) = pairs.next() {
-        ParsedConstructorTag::Explicit(parse_constructor_tag(next)?)
-    } else {
-        ParsedConstructorTag::Implicit
-    };
-
-    Ok((name, constructor_tag))
+    name_opt
+        .padded()
+        .then(fields)
+        .then_ignore(just('=').padded())
+        .then(name(IdentType::Uppercase).padded())
+        .then(term.padded().repeated().collect::<Vec<_>>())
+        .then_ignore(just(';'))
+        .map_with(
+            |((((name, tag), fields), output_type), output_type_args), e| ast::Constructor {
+                span: e.span(),
+                name,
+                tag,
+                fields,
+                output_type,
+                output_type_args,
+            },
+        )
 }
 
-enum ParsedConstructorTag {
-    Implicit,
-    Explicit(Option<ConstructorTag>),
+fn tag<'a>() -> impl Parser<'a, &'a str, ast::ConstructorTag, State> + Clone {
+    use chumsky::input::MapExtra;
+
+    let binary = just('$')
+        .ignore_then(one_of("01").repeated().at_least(1).to_slice())
+        .try_map_with(|s, e: &mut MapExtra<_, State>| {
+            let value = u32::from_str_radix(s, 2).map_err(|source| ParserError::InvalidInt {
+                span: e.span(),
+                source,
+            })?;
+
+            Ok(ast::ConstructorTag {
+                span: e.span(),
+                bits: (s.len() as u8).try_into().unwrap(),
+                value,
+            })
+        });
+
+    let hex = just('#')
+        .ignore_then(
+            any()
+                .filter(|&c: &char| c.is_ascii_hexdigit())
+                .repeated()
+                .at_least(1)
+                .to_slice(),
+        )
+        .try_map_with(|s, e: &mut MapExtra<_, State>| {
+            let value = u32::from_str_radix(s, 16).map_err(|source| ParserError::InvalidInt {
+                span: e.span(),
+                source,
+            })?;
+
+            Ok(ast::ConstructorTag {
+                span: e.span(),
+                bits: (4 * s.len() as u8).try_into().unwrap(),
+                value,
+            })
+        });
+
+    choice((binary, hex)).boxed()
 }
 
-fn parse_constructor_tag(pair: Pair<'_, Rule>) -> Result<Option<ConstructorTag>, ParserError> {
-    let tag_raw = pair.as_str();
-    let (radix, bits) = match pair.as_rule() {
-        Rule::constructor_tag_empty => return Ok(None),
-        Rule::constructor_tag_binary => (2, tag_raw.len() as u8),
-        Rule::constructor_tag_hex => (16, (tag_raw.len() * 4) as u8),
-        _ => unreachable!(),
-    };
-    let bits = NonZeroU8::new(bits).ok_or(ParserError::InvalidConstructorTag)?;
-    let value =
-        u32::from_str_radix(tag_raw, radix).map_err(|_| ParserError::InvalidConstructorTag)?;
-    Ok(Some(ConstructorTag { value, bits }))
+fn field_list<'a>(
+    term: Recursive<dyn Parser<'a, &'a str, ast::TypeExpr, State> + 'a>,
+) -> impl Parser<'a, &'a str, Vec<ast::Field>, State> + Clone {
+    none_of("=]")
+        .ignore_then(field(term).padded())
+        .repeated()
+        .collect()
 }
 
-fn parse_type_arg(ctx: &mut Context, pair: Pair<'_, Rule>) -> Result<Generic, ParserError> {
-    let mut pairs = pair.into_inner();
-    let ident = ctx.make_symbol(&pairs.next().unwrap());
-    let ty = match pairs.next().unwrap().as_rule() {
-        Rule::nat_type => GenericType::Nat,
-        Rule::r#type => GenericType::Type,
-        _ => unreachable!(),
-    };
-    Ok(Generic { ident, ty })
+fn field<'a>(
+    term: Recursive<dyn Parser<'a, &'a str, ast::TypeExpr, State> + 'a>,
+) -> impl Parser<'a, &'a str, ast::Field, State> + Clone {
+    let implicit_param = ident(IdentType::Any)
+        .then_ignore(just(':'))
+        .then(implicit_ty())
+        .map_with(|(ident, ty), e| ast::Field::ImplicitParam {
+            span: e.span(),
+            ident,
+            ty,
+        });
+
+    let constraint = expr(term.clone()).map_with(|expr, e| ast::Field::Constraint {
+        span: e.span(),
+        expr: Box::new(expr),
+    });
+
+    let param = name(IdentType::Lowercase)
+        .then_ignore(just(':'))
+        .or_not()
+        .then(expr_95(term.clone()))
+        .map_with(|(ident, ty), e| ast::Field::Param {
+            span: e.span(),
+            ident,
+            ty: Box::new(ty),
+        });
+
+    choice((
+        choice((implicit_param, constraint)).delimited_by(just('{'), just('}')),
+        param,
+    ))
+    .boxed()
 }
 
-fn parse_field_group_item(
-    ctx: &mut Context,
-    pair: Pair<'_, Rule>,
-) -> Result<FieldGroupItem, ParserError> {
-    let mut pairs = pair.into_inner().peekable();
-
-    if let Some(next) = pairs.peek() {
-        match next.as_rule() {
-            Rule::field => {
-                return Ok(FieldGroupItem::Field(parse_field(
-                    ctx,
-                    pairs.next().unwrap(),
-                )?))
-            }
-            Rule::constraint_expr => {
-                return Ok(FieldGroupItem::Constraint(parse_constraint_expr(
-                    ctx,
-                    pairs.next().unwrap(),
-                )?))
-            }
-            _ => {}
-        }
-    }
-
-    let mut fields = Vec::new();
-    for pair in pairs {
-        fields.push(parse_field_group_item(ctx, pair)?);
-    }
-    Ok(FieldGroupItem::ChildCell(fields))
-}
-
-fn parse_field(ctx: &mut Context, pair: Pair<'_, Rule>) -> Result<Field, ParserError> {
-    let mut pairs = pair.into_inner().peekable();
-
-    let mut ident = None;
-    if let Some(next) = pairs.peek() {
-        if next.as_rule() == Rule::ident {
-            ident = Some(ctx.make_symbol(next));
-            pairs.next();
-        }
-    }
-
-    let mut condition = None;
-    if let Some(next) = pairs.peek() {
-        if next.as_rule() == Rule::field_condition {
-            if let Some(pair) = pairs.next() {
-                let mut pairs = pair.into_inner();
-
-                let ident = ctx.make_symbol(&pairs.next().unwrap());
-                let bit = pairs.next().unwrap().as_str();
-
-                condition = Some(FieldCondition {
+fn term<'a>() -> Recursive<dyn Parser<'a, &'a str, ast::TypeExpr, State> + 'a> {
+    recursive(move |term| {
+        choice((
+            expr(term.clone())
+                .padded()
+                .delimited_by(just('('), just(')'))
+                .map_with(|res, e| res),
+            nat_const().map_with(|value, e| ast::TypeExpr::Const {
+                span: e.span(),
+                value,
+            }),
+            just('^')
+                .ignore_then(term)
+                .map(|value| ast::TypeExpr::Ref(Box::new(value))),
+            just('~')
+                .ignore_then(ident(IdentType::Lowercase))
+                .map_with(|ident, e| ast::TypeExpr::Negate {
+                    span: e.span(),
                     ident,
-                    bit: bit.parse().map_err(ParserError::InvalidNatConst)?,
-                });
-            }
-        }
-    }
-
-    let ty = parse_type_expr(ctx, pairs.next().unwrap())?;
-
-    Ok(Field {
-        ident,
-        condition,
-        ty,
+                }),
+            ident(IdentType::Any).map_with(|ident, e| ast::TypeExpr::Apply {
+                span: e.span(),
+                ident,
+                args: Vec::new(),
+            }),
+        ))
     })
 }
 
-fn parse_output_type(
-    ctx: &mut Context,
-    pair: Pair<'_, Rule>,
-) -> Result<(Symbol, Vec<TypeExpr>), ParserError> {
-    let mut pairs = pair.into_inner();
+fn expr<'a>(
+    term: Recursive<dyn Parser<'a, &'a str, ast::TypeExpr, State> + 'a>,
+) -> impl Parser<'a, &'a str, ast::TypeExpr, State> + Clone {
+    let expr_20 = expr_20(term);
+    let op = choice((just("<="), just(">="), one_of("=<>").to_slice()));
 
-    let name = ctx.make_symbol(&pairs.next().unwrap());
-
-    let mut types = Vec::new();
-    for pair in pairs {
-        types.push(parse_type_expr(ctx, pair)?);
-    }
-
-    Ok((name, types))
-}
-
-fn parse_type_expr(ctx: &mut Context, pair: Pair<'_, Rule>) -> Result<TypeExpr, ParserError> {
-    let mut pairs = pair.into_inner();
-
-    let mut pair = pairs.next().unwrap();
-    loop {
-        let type_expr = match pair.as_rule() {
-            Rule::type_expr => {
-                pair = pair.into_inner().next().unwrap();
-                continue;
-            }
-            Rule::nat_const => {
-                let value = pair
-                    .as_str()
-                    .parse()
-                    .map_err(ParserError::InvalidNatConst)?;
-                TypeExpr::Const(value)
-            }
-            Rule::nat_type => TypeExpr::Nat,
-            Rule::nat_type_width => TypeExpr::AltNat(AltNat::Width(parse_nat_value(
-                ctx,
-                pair.into_inner().next().unwrap(),
-            )?)),
-            Rule::nat_type_leq => TypeExpr::AltNat(AltNat::Leq(parse_nat_value(
-                ctx,
-                pair.into_inner().next().unwrap(),
-            )?)),
-            Rule::nat_type_less => TypeExpr::AltNat(AltNat::Less(parse_nat_value(
-                ctx,
-                pair.into_inner().next().unwrap(),
-            )?)),
-            Rule::nat_expr => TypeExpr::NatExpr(parse_nat_expr(ctx, pair)?),
-            Rule::ident => {
-                let mut types = Vec::new();
-                for pair in pairs {
-                    types.push(parse_type_expr(ctx, pair)?);
+    expr_20
+        .clone()
+        .then(op.padded().then(expr_20.clone()).or_not())
+        .map_with(|(mut left, right), e| match right {
+            None => left,
+            Some((op, mut right)) => {
+                let op = match op {
+                    "=" => ast::ConstraintOp::Eq,
+                    "<" => ast::ConstraintOp::Lt,
+                    "<=" => ast::ConstraintOp::Le,
+                    ">" => {
+                        std::mem::swap(&mut left, &mut right);
+                        ast::ConstraintOp::Lt
+                    }
+                    ">=" => {
+                        std::mem::swap(&mut left, &mut right);
+                        ast::ConstraintOp::Le
+                    }
+                    _ => unreachable!(),
+                };
+                ast::TypeExpr::Constraint {
+                    span: e.span(),
+                    op,
+                    left: Box::new(left),
+                    right: Box::new(right),
                 }
-                TypeExpr::Ident(ctx.make_symbol(&pair), types)
             }
-            Rule::type_in_cell => {
-                let inner = pair.into_inner().next().unwrap();
-                TypeExpr::ChildCell(Box::new(parse_type_expr(ctx, inner)?))
-            }
-            Rule::neg_type_expr => {
-                let inner = pair.into_inner().next().unwrap();
-                TypeExpr::Neg(Box::new(parse_type_expr(ctx, inner)?))
-            }
-            e => unreachable!("{e:?}"),
-        };
-
-        break Ok(type_expr);
-    }
+        })
+        .boxed()
 }
 
-fn parse_nat_expr(ctx: &mut Context, pair: Pair<'_, Rule>) -> Result<NatExpr, ParserError> {
-    let mut pairs = pair.into_inner();
+fn expr_20<'a>(
+    term: Recursive<dyn Parser<'a, &'a str, ast::TypeExpr, State> + 'a>,
+) -> impl Parser<'a, &'a str, ast::TypeExpr, State> + Clone {
+    let expr_30 = expr_30(term);
 
-    let left = parse_nat_value(ctx, pairs.next().unwrap())?;
-    let op = parse_nat_op(pairs.next().unwrap())?;
-    let right = parse_nat_value(ctx, pairs.next().unwrap())?;
-
-    Ok(NatExpr { left, right, op })
+    expr_30
+        .clone()
+        .foldl_with(
+            just('+').padded().ignore_then(expr_30).repeated(),
+            |left, right, e| ast::TypeExpr::Add {
+                span: e.span(),
+                left: Box::new(left),
+                right: Box::new(right),
+            },
+        )
+        .boxed()
 }
 
-fn parse_constraint_expr(
-    ctx: &mut Context,
-    pair: Pair<'_, Rule>,
-) -> Result<ConstraintExpr, ParserError> {
-    let mut pairs = pair.into_inner();
+fn expr_30<'a>(
+    term: Recursive<dyn Parser<'a, &'a str, ast::TypeExpr, State> + 'a>,
+) -> impl Parser<'a, &'a str, ast::TypeExpr, State> + Clone {
+    let expr_90 = expr_90(term);
 
-    let left = parse_constraint_operand(ctx, pairs.next().unwrap())?;
-    let op = match pairs.next().unwrap().as_str() {
-        "<" => ConstraintOperator::Lt,
-        "<=" => ConstraintOperator::Le,
-        "=" => ConstraintOperator::Eq,
-        ">=" => ConstraintOperator::Ge,
-        ">" => ConstraintOperator::Gt,
-        _ => return Err(ParserError::UnknownOperator),
-    };
-    let right = parse_constraint_operand(ctx, pairs.next().unwrap())?;
-
-    Ok(ConstraintExpr { left, right, op })
+    expr_90
+        .clone()
+        .foldl_with(
+            just('*').padded().ignore_then(expr_90).repeated(),
+            |left, right, e| ast::TypeExpr::Mul {
+                span: e.span(),
+                left: Box::new(left),
+                right: Box::new(right),
+            },
+        )
+        .boxed()
 }
 
-fn parse_constraint_operand(
-    ctx: &mut Context,
-    mut pair: Pair<'_, Rule>,
-) -> Result<ConstraintOperand, ParserError> {
-    loop {
-        let operand = match pair.as_rule() {
-            Rule::constraint_operand => {
-                pair = pair.into_inner().next().unwrap();
-                continue;
+fn expr_90<'a>(
+    term: Recursive<dyn Parser<'a, &'a str, ast::TypeExpr, State> + 'a>,
+) -> impl Parser<'a, &'a str, ast::TypeExpr, State> + Clone {
+    use chumsky::input::MapExtra;
+    use chumsky::span::Span as _;
+
+    let expr_95 = expr_95(term).padded();
+
+    let alt_nat = choice((just("##"), just("#<"), just("#<=")))
+        .to_slice()
+        .padded()
+        .then(nat_const())
+        .map_with(|(kind, arg), e| ast::TypeExpr::AltNat {
+            span: e.span(),
+            kind: match kind {
+                "##" => ast::AltNat::Width,
+                "#<" => ast::AltNat::Less,
+                "#<=" => ast::AltNat::Leq,
+                _ => unreachable!(),
+            },
+            arg,
+        });
+
+    let res = expr_95
+        .clone()
+        .then(expr_95.repeated().collect::<Vec<_>>())
+        .try_map_with(|(mut res, mut new), e: &mut MapExtra<_, State>| {
+            let ast::TypeExpr::Apply { span, args, .. } = &mut res else {
+                return Err(ParserError::InvalidApply { span: e.span() });
+            };
+
+            args.reserve(new.len());
+            for arg in new.drain(..) {
+                *span = span.union(arg.span());
+                args.push(arg);
             }
-            Rule::ident => ConstraintOperand::Field(ctx.make_symbol(&pair)),
-            Rule::nat_const => pair
-                .as_str()
-                .parse()
-                .map(ConstraintOperand::Const)
-                .map_err(ParserError::InvalidNatConst)?,
-            Rule::neg_constraint_operand => {
-                let inner = pair.into_inner().next().unwrap();
-                ConstraintOperand::Neg(Box::new(parse_constraint_operand(ctx, inner)?))
+
+            Ok(res)
+        });
+
+    choice((alt_nat, res)).boxed()
+}
+
+fn expr_95<'a>(
+    term: Recursive<dyn Parser<'a, &'a str, ast::TypeExpr, State> + 'a>,
+) -> impl Parser<'a, &'a str, ast::TypeExpr, State> + Clone {
+    expr_97(term.clone())
+        .padded()
+        .then(just('?').ignore_then(term.padded()).or_not())
+        .map_with(|(left, right), e| match right {
+            None => left,
+            Some(right) => ast::TypeExpr::Cond {
+                span: e.span(),
+                cond: Box::new(left),
+                value: Box::new(right),
+            },
+        })
+        .boxed()
+}
+
+fn expr_97<'a>(
+    term: Recursive<dyn Parser<'a, &'a str, ast::TypeExpr, State> + 'a>,
+) -> impl Parser<'a, &'a str, ast::TypeExpr, State> + Clone {
+    let term = term.padded();
+
+    term.clone()
+        .then(just('.').ignore_then(term).or_not())
+        .map_with(|(left, right), e| match right {
+            None => left,
+            Some(right) => ast::TypeExpr::GetBit {
+                span: e.span(),
+                value: Box::new(left),
+                bit: Box::new(right),
+            },
+        })
+        .boxed()
+}
+
+fn nat_const<'a>() -> impl Parser<'a, &'a str, u32, State> + Clone {
+    text::int(10).try_map(|s, span| {
+        u32::from_str_radix(s, 10).map_err(move |source| ParserError::InvalidInt { span, source })
+    })
+}
+
+fn implicit_ty<'a>() -> impl Parser<'a, &'a str, ast::GenericType, State> + Clone {
+    use chumsky::input::MapExtra;
+
+    any()
+        .filter(|&c: &char| c.is_ascii_alphanumeric() || c == '_')
+        .repeated()
+        .at_least(1)
+        .to_slice()
+        .try_map_with(move |ident: &str, e: &mut MapExtra<_, State>| match ident {
+            "Type" => Ok(ast::GenericType::Type),
+            "#" => Ok(ast::GenericType::Nat),
+            _ => Err(ParserError::InvalidImplicit { span: e.span() }),
+        })
+}
+
+fn name<'a>(ty: IdentType) -> impl Parser<'a, &'a str, ast::Name, State> + Clone {
+    ident(ty)
+        .map_with(|ident, e| ast::Name {
+            span: e.span(),
+            ident,
+        })
+        .boxed()
+}
+
+fn ident<'a>(ty: IdentType) -> impl Parser<'a, &'a str, Symbol, State> + Clone {
+    use chumsky::input::MapExtra;
+
+    any()
+        .filter(|&c: &char| c.is_ascii_alphanumeric() || c == '_')
+        .repeated()
+        .at_least(1)
+        .to_slice()
+        .try_map_with(move |ident: &str, e: &mut MapExtra<_, State>| {
+            if ident.chars().all(|c| c.is_ascii_digit()) {
+                return Err(ParserError::IdentExpected { span: e.span() });
             }
-            Rule::constraint_operand_expr => {
-                let mut pairs = pair.into_inner();
-                let left = parse_constraint_operand(ctx, pairs.next().unwrap())?;
-                let op = parse_nat_op(pairs.next().unwrap())?;
-                let right = parse_constraint_operand(ctx, pairs.next().unwrap())?;
-                ConstraintOperand::Expr(Box::new(ConstraintOperandExpr { left, right, op }))
+
+            let first = ident.chars().next().expect("non-empty string");
+            match ty {
+                IdentType::Lowercase if !first.is_ascii_lowercase() => {
+                    Err(ParserError::LowercastIdentExpected { span: e.span() })
+                }
+                IdentType::Uppercase if !first.is_ascii_uppercase() => {
+                    Err(ParserError::UppercaseIdentExpected { span: e.span() })
+                }
+                _ => Ok(e.state().intern_symbol(ident)),
             }
-            _ => unreachable!(),
-        };
-
-        break Ok(operand);
-    }
+        })
 }
 
-fn parse_nat_value(ctx: &mut Context, pair: Pair<'_, Rule>) -> Result<NatValue, ParserError> {
-    match pair.as_rule() {
-        Rule::ident => Ok(NatValue::Ident(ctx.make_symbol(&pair))),
-        Rule::nat_const => pair
-            .as_str()
-            .parse()
-            .map(NatValue::Const)
-            .map_err(ParserError::InvalidNatConst),
-        _ => unreachable!(),
-    }
+// fn comment<'a>() -> impl Parser<'a, &'a str, (), State> + Clone {
+//     just("//")
+//         .then(any().and_is(just('\n').not()).repeated())
+//         .padded()
+//         .ignored()
+// }
+
+#[derive(Default, Debug, Clone, Copy, PartialEq, Eq)]
+enum IdentType {
+    #[default]
+    Any,
+    Lowercase,
+    Uppercase,
 }
 
-fn parse_nat_op(pair: Pair<'_, Rule>) -> Result<NatOperator, ParserError> {
-    match pair.as_str() {
-        "+" => Ok(NatOperator::Add),
-        "-" => Ok(NatOperator::Sub),
-        "*" => Ok(NatOperator::Mul),
-        _ => Err(ParserError::UnknownOperator),
-    }
+type State = extra::Full<ParserError, Context, ()>;
+
+#[derive(thiserror::Error, Debug)]
+pub enum ParserError {
+    #[error("unexpected character found: {found:?}")]
+    UnexpectedChar { span: Span, found: Option<char> },
+    #[error("identifier expected")]
+    IdentExpected { span: Span },
+    #[error("lowercase identifier expected")]
+    LowercastIdentExpected { span: Span },
+    #[error("uppercase identifier expected")]
+    UppercaseIdentExpected { span: Span },
+    #[error("invalid integer: {source}")]
+    InvalidInt {
+        span: Span,
+        #[source]
+        source: std::num::ParseIntError,
+    },
+    #[error("either `Type` or `#` implicit parameter expected")]
+    InvalidImplicit { span: Span },
+    #[error("cannot apply one expression to another")]
+    InvalidApply { span: Span },
+    #[error("unknown error")]
+    Unknown,
 }
 
-fn read_same_rules<'a, F>(
-    pairs: &mut Pairs<'a, Rule>,
-    rule: Rule,
-    mut f: F,
-) -> Result<(), ParserError>
-where
-    F: FnMut(Pair<'a, Rule>) -> Result<(), ParserError>,
-{
-    while pairs
-        .peek()
-        .map(|pair| pair.as_rule() == rule)
-        .unwrap_or_default()
-    {
-        if let Some(pair) = pairs.next() {
-            f(pair)?;
+impl<'a> chumsky::error::Error<'a, &'a str> for ParserError {
+    fn expected_found<Iter: IntoIterator<Item = Option<MaybeRef<'a, char>>>>(
+        _: Iter,
+        found: Option<MaybeRef<'a, char>>,
+        span: Span,
+    ) -> Self {
+        Self::UnexpectedChar {
+            span,
+            found: found.as_deref().copied(),
         }
     }
-    Ok(())
-}
 
-#[derive(Debug, Clone, thiserror::Error)]
-pub enum ParserError {
-    #[error("invalid input:\n{0}")]
-    InvalidInput(Box<pest::error::Error<Rule>>),
-    #[error("invalid constructor tag")]
-    InvalidConstructorTag,
-    #[error("invalid integer constant")]
-    InvalidNatConst(#[source] std::num::ParseIntError),
-    #[error("unknown operator")]
-    UnknownOperator,
+    fn merge(self, _: Self) -> Self {
+        self
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn check_scheme(s: &str) {
-        let s = Scheme::parse(&mut Default::default(), s).unwrap();
-        println!("{s:#?}");
-    }
-
-    fn check_constructor(s: &str) {
-        let c = Constructor::parse(&mut Default::default(), s).unwrap();
-        println!("{c:#?}");
-    }
-
     #[test]
-    fn simple_scheme() {
-        check_constructor("unit$_ = Unit");
-        check_constructor("true$_ = True");
-        check_constructor("bool_false$0 = Bool");
-        check_constructor("bool_true$1 = Bool");
-        check_constructor("bool_false$0 = BoolFalse");
-        check_constructor("bool_true$1 = BoolTrue");
-        check_constructor("nothing$0 {X:Type} = Maybe X");
-        check_constructor("just$1 {X:Type} value:X = Maybe X");
-        check_constructor("left$0 {X:Type} {Y:Type} value:X = Either X Y");
-        check_constructor("right$1 {X:Type} {Y:Type} value:Y = Either X Y");
-        check_constructor("pair$_ {X:Type} {Y:Type} first:X second:Y = Both X Y");
+    fn scheme() {
+        let mut ctx = Context::default();
+        let input = r####"
+        addr_none$00 = MsgAddressExt;
+        addr_extern$01 len:(## 9) external_address:(bits len)
+                     = MsgAddressExt;
+        anycast_info$_ depth:(#<= 30) { depth >= 1 }
+           rewrite_pfx:(bits depth) = Anycast;
+        addr_std$10 anycast:(Maybe Anycast)
+           workchain_id:int8 address:bits256  = MsgAddressInt;
+        addr_var$11 anycast:(Maybe Anycast) addr_len:(## 9)
+           workchain_id:int32 address:(bits addr_len) = MsgAddressInt;
+        _ _:MsgAddressInt = MsgAddress;
+        _ _:MsgAddressExt = MsgAddress;
+        "####;
 
-        check_constructor("bit$_ (## 1) = Bit");
-    }
-
-    #[test]
-    fn scheme_with_constraints() {
-        check_scheme(
-            r####"
-            addr_none$00 = MsgAddressExt;
-            addr_extern$01 len:(## 9) external_address:(bits len)
-                        = MsgAddressExt;
-            anycast_info$_ depth:(#<= 30) { depth >= 1 }
-            rewrite_pfx:(bits depth) = Anycast;
-            addr_std$10 anycast:(Maybe Anycast)
-            workchain_id:int8 address:bits256  = MsgAddressInt;
-            addr_var$11 anycast:(Maybe Anycast) addr_len:(## 9)
-            workchain_id:int32 address:(bits addr_len) = MsgAddressInt;
-            _ _:MsgAddressInt = MsgAddress;
-            _ _:MsgAddressExt = MsgAddress;
-            "####,
-        );
-    }
-
-    #[test]
-    fn scheme_with_resolved_args() {
-        check_scheme(
-            r####"
-            bit#_ _:(## 1) = Bit;
-
-            // ordinary Hashmap / HashmapE, with fixed length keys
-            //
-            hm_edge#_ {n:#} {X:Type} {l:#} {m:#} label:(HmLabel ~l n)
-                    {n = (~m) + l} node:(HashmapNode m X) = Hashmap n X;
-
-            hmn_leaf#_ {X:Type} value:X = HashmapNode 0 X;
-            hmn_fork#_ {n:#} {X:Type} left:^(Hashmap n X)
-                    right:^(Hashmap n X) = HashmapNode (n + 1) X;
-
-            hml_short$0 {m:#} {n:#} len:(Unary ~n) s:(n * Bit) = HmLabel ~n m;
-            hml_long$10 {m:#} n:(#<= m) s:(n * Bit) = HmLabel ~n m;
-            hml_same$11 {m:#} v:Bit n:(#<= m) = HmLabel ~n m;
-
-            unary_zero$0 = Unary ~0;
-            unary_succ$1 {n:#} x:(Unary ~n) = Unary ~(n + 1);
-            "####,
-        );
+        let result = ast::Scheme::parse(&mut ctx, input);
+        println!("{result:#?}");
     }
 }
