@@ -109,7 +109,7 @@ pub enum Field {
         /// Source location.
         span: Span,
         /// Optional field name.
-        ident: Option<Name>,
+        name: Option<Name>,
         /// Field type.
         ty: Box<TypeExpr>,
     },
@@ -137,7 +137,11 @@ pub enum TypeExpr {
     /// test field:(#<= 10) = Test;
     /// test field:(#< 10) = Test;
     /// ```
-    AltNat { span: Span, kind: AltNat, arg: u32 },
+    AltNat {
+        span: Span,
+        kind: AltNat,
+        arg: Box<TypeExpr>,
+    },
     /// Addition expression with integer values.
     ///
     /// ```text
@@ -200,13 +204,13 @@ pub enum TypeExpr {
         args: Vec<TypeExpr>,
     },
     /// Negated field.
-    Negate { span: Span, ident: Symbol },
+    Negate { span: Span, value: Box<TypeExpr> },
     /// Type serialized into a separate cell.
     ///
     /// ```text
     /// test field:^(## 64) = Test;
     /// ```
-    Ref(Box<TypeExpr>),
+    Ref { span: Span, value: Box<TypeExpr> },
 }
 
 impl TypeExpr {
@@ -221,8 +225,8 @@ impl TypeExpr {
             | Self::Cond { span, .. }
             | Self::GetBit { span, .. }
             | Self::Apply { span, .. }
-            | Self::Negate { span, .. } => *span,
-            Self::Ref(x) => x.span(),
+            | Self::Negate { span, .. }
+            | Self::Ref { span, .. } => *span,
         }
     }
 }

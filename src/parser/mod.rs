@@ -6,7 +6,7 @@ use string_interner::{DefaultBackend, StringInterner};
 use self::symbol::Symbol;
 
 pub mod ast;
-// mod crc;
+pub mod crc;
 mod symbol;
 
 pub type Span = SimpleSpan<usize>;
@@ -38,16 +38,23 @@ impl ast::Scheme {
 
 impl ast::Constructor {
     pub fn parse(ctx: &mut Context, input: &str) -> Result<Self, Vec<ParserError>> {
-        constructor().parse_with_state(input, ctx).into_result()
+        constructor()
+            .padded()
+            .parse_with_state(input, ctx)
+            .into_result()
     }
 }
 
 fn scheme<'a>() -> impl Parser<'a, &'a str, ast::Scheme, State> + Clone {
+    let comment = comment().repeated();
+
     constructor()
+        .padded_by(comment.clone())
         .recover_with(skip_then_retry_until(any().ignored(), text::newline()))
-        .padded()
         .repeated()
         .collect()
+        .padded()
+        .padded_by(comment)
         .map(|items| ast::Scheme {
             declarations: items,
         })
@@ -56,14 +63,15 @@ fn scheme<'a>() -> impl Parser<'a, &'a str, ast::Scheme, State> + Clone {
 fn constructor<'a>() -> impl Parser<'a, &'a str, ast::Constructor, State> + Clone {
     let term = term();
 
-    let name_opt =
-        choice((just('_').to(None), name(IdentType::Lowercase).map(Some))).then(tag().or_not());
+    let name_opt = choice((just('_').to(None), name(IdentType::Lowercase).map(Some))).then(choice(
+        (just("$_").to(None), just("#_").to(None), tag().or_not()),
+    ));
     let fields = field_list(term.clone());
 
     name_opt
         .padded()
         .then(fields)
-        .then_ignore(just('=').padded())
+        .then_ignore(just('='))
         .then(name(IdentType::Uppercase).padded())
         .then(term.padded().repeated().collect::<Vec<_>>())
         .then_ignore(just(';'))
@@ -77,6 +85,7 @@ fn constructor<'a>() -> impl Parser<'a, &'a str, ast::Constructor, State> + Clon
                 output_type_args,
             },
         )
+        .boxed()
 }
 
 fn tag<'a>() -> impl Parser<'a, &'a str, ast::ConstructorTag, State> + Clone {
@@ -124,17 +133,14 @@ fn tag<'a>() -> impl Parser<'a, &'a str, ast::ConstructorTag, State> + Clone {
 fn field_list<'a>(
     term: Recursive<dyn Parser<'a, &'a str, ast::TypeExpr, State> + 'a>,
 ) -> impl Parser<'a, &'a str, Vec<ast::Field>, State> + Clone {
-    none_of("=]")
-        .ignore_then(field(term).padded())
-        .repeated()
-        .collect()
+    field(term).padded().repeated().collect()
 }
 
 fn field<'a>(
     term: Recursive<dyn Parser<'a, &'a str, ast::TypeExpr, State> + 'a>,
 ) -> impl Parser<'a, &'a str, ast::Field, State> + Clone {
     let implicit_param = ident(IdentType::Any)
-        .then_ignore(just(':'))
+        .then_ignore(just(':').padded())
         .then(implicit_ty())
         .map_with(|(ident, ty), e| ast::Field::ImplicitParam {
             span: e.span(),
@@ -148,17 +154,19 @@ fn field<'a>(
     });
 
     let param = name(IdentType::Lowercase)
-        .then_ignore(just(':'))
+        .then_ignore(just(':').padded())
         .or_not()
         .then(expr_95(term.clone()))
         .map_with(|(ident, ty), e| ast::Field::Param {
             span: e.span(),
-            ident,
+            name: ident,
             ty: Box::new(ty),
         });
 
     choice((
-        choice((implicit_param, constraint)).delimited_by(just('{'), just('}')),
+        choice((implicit_param, constraint))
+            .padded()
+            .delimited_by(just('{'), just('}')),
         param,
     ))
     .boxed()
@@ -169,20 +177,22 @@ fn term<'a>() -> Recursive<dyn Parser<'a, &'a str, ast::TypeExpr, State> + 'a> {
         choice((
             expr(term.clone())
                 .padded()
-                .delimited_by(just('('), just(')'))
-                .map_with(|res, e| res),
+                .delimited_by(just('('), just(')')),
             nat_const().map_with(|value, e| ast::TypeExpr::Const {
                 span: e.span(),
                 value,
             }),
             just('^')
-                .ignore_then(term)
-                .map(|value| ast::TypeExpr::Ref(Box::new(value))),
-            just('~')
-                .ignore_then(ident(IdentType::Lowercase))
-                .map_with(|ident, e| ast::TypeExpr::Negate {
+                .ignore_then(term.clone())
+                .map_with(|value, e| ast::TypeExpr::Ref {
                     span: e.span(),
-                    ident,
+                    value: Box::new(value),
+                }),
+            just('~')
+                .ignore_then(term)
+                .map_with(|value, e| ast::TypeExpr::Negate {
+                    span: e.span(),
+                    value: Box::new(value),
                 }),
             ident(IdentType::Any).map_with(|ident, e| ast::TypeExpr::Apply {
                 span: e.span(),
@@ -274,10 +284,10 @@ fn expr_90<'a>(
 
     let expr_95 = expr_95(term).padded();
 
-    let alt_nat = choice((just("##"), just("#<"), just("#<=")))
+    let alt_nat = choice((just("##"), just("#<="), just("#<")))
         .to_slice()
         .padded()
-        .then(nat_const())
+        .then(expr_95.clone())
         .map_with(|(kind, arg), e| ast::TypeExpr::AltNat {
             span: e.span(),
             kind: match kind {
@@ -286,15 +296,20 @@ fn expr_90<'a>(
                 "#<=" => ast::AltNat::Leq,
                 _ => unreachable!(),
             },
-            arg,
+            arg: Box::new(arg),
         });
 
     let res = expr_95
         .clone()
         .then(expr_95.repeated().collect::<Vec<_>>())
-        .try_map_with(|(mut res, mut new), e: &mut MapExtra<_, State>| {
+        .validate(|(mut res, mut new), e: &mut MapExtra<_, State>, emitter| {
+            if new.is_empty() {
+                return res;
+            }
+
             let ast::TypeExpr::Apply { span, args, .. } = &mut res else {
-                return Err(ParserError::InvalidApply { span: e.span() });
+                emitter.emit(ParserError::InvalidApply { span: e.span() });
+                return res;
             };
 
             args.reserve(new.len());
@@ -303,7 +318,7 @@ fn expr_90<'a>(
                 args.push(arg);
             }
 
-            Ok(res)
+            res
         });
 
     choice((alt_nat, res)).boxed()
@@ -345,24 +360,41 @@ fn expr_97<'a>(
 }
 
 fn nat_const<'a>() -> impl Parser<'a, &'a str, u32, State> + Clone {
-    text::int(10).try_map(|s, span| {
-        u32::from_str_radix(s, 10).map_err(move |source| ParserError::InvalidInt { span, source })
-    })
+    any()
+        .filter(|&c: &char| c.is_ascii_digit())
+        .repeated()
+        .at_least(1)
+        .to_slice()
+        .validate(|s: &str, e, emitter| match s.parse::<u32>() {
+            Ok(value) => value,
+            Err(source) => {
+                emitter.emit(ParserError::InvalidInt {
+                    span: e.span(),
+                    source,
+                });
+                0
+            }
+        })
 }
 
 fn implicit_ty<'a>() -> impl Parser<'a, &'a str, ast::GenericType, State> + Clone {
     use chumsky::input::MapExtra;
 
     any()
-        .filter(|&c: &char| c.is_ascii_alphanumeric() || c == '_')
+        .filter(|&c: &char| c.is_ascii_alphanumeric() || matches!(c, '#' | '_'))
         .repeated()
         .at_least(1)
         .to_slice()
-        .try_map_with(move |ident: &str, e: &mut MapExtra<_, State>| match ident {
-            "Type" => Ok(ast::GenericType::Type),
-            "#" => Ok(ast::GenericType::Nat),
-            _ => Err(ParserError::InvalidImplicit { span: e.span() }),
-        })
+        .validate(
+            move |ident: &str, e: &mut MapExtra<_, State>, emitter| match ident {
+                "Type" => ast::GenericType::Type,
+                "#" => ast::GenericType::Nat,
+                _ => {
+                    emitter.emit(ParserError::InvalidImplicit { span: e.span() });
+                    ast::GenericType::Type
+                }
+            },
+        )
 }
 
 fn name<'a>(ty: IdentType) -> impl Parser<'a, &'a str, ast::Name, State> + Clone {
@@ -382,30 +414,42 @@ fn ident<'a>(ty: IdentType) -> impl Parser<'a, &'a str, Symbol, State> + Clone {
         .repeated()
         .at_least(1)
         .to_slice()
-        .try_map_with(move |ident: &str, e: &mut MapExtra<_, State>| {
-            if ident.chars().all(|c| c.is_ascii_digit()) {
-                return Err(ParserError::IdentExpected { span: e.span() });
-            }
-
-            let first = ident.chars().next().expect("non-empty string");
-            match ty {
-                IdentType::Lowercase if !first.is_ascii_lowercase() => {
-                    Err(ParserError::LowercastIdentExpected { span: e.span() })
+        .validate(move |ident: &str, e: &mut MapExtra<_, State>, emitter| {
+            let ident = 'ident: {
+                if !ident.chars().all(|c| c.is_ascii_digit()) {
+                    let first = ident.chars().next().expect("non-empty string");
+                    match ty {
+                        IdentType::Lowercase if !first.is_ascii_lowercase() && ident != "_" => {
+                            emitter.emit(ParserError::LowercastIdentExpected { span: e.span() })
+                        }
+                        IdentType::Uppercase if !first.is_ascii_uppercase() => {
+                            emitter.emit(ParserError::UppercaseIdentExpected { span: e.span() })
+                        }
+                        _ => break 'ident ident,
+                    }
+                } else {
+                    emitter.emit(ParserError::IdentExpected { span: e.span() });
                 }
-                IdentType::Uppercase if !first.is_ascii_uppercase() => {
-                    Err(ParserError::UppercaseIdentExpected { span: e.span() })
-                }
-                _ => Ok(e.state().intern_symbol(ident)),
-            }
+                INVALID_IDENT
+            };
+            e.state().intern_symbol(ident)
         })
 }
 
-// fn comment<'a>() -> impl Parser<'a, &'a str, (), State> + Clone {
-//     just("//")
-//         .then(any().and_is(just('\n').not()).repeated())
-//         .padded()
-//         .ignored()
-// }
+fn comment<'a>() -> impl Parser<'a, &'a str, (), State> + Clone {
+    let single_line_comment = just("//")
+        .then(any().and_is(just('\n').not()).repeated())
+        .padded()
+        .ignored();
+
+    let multi_line_comment = just("/*")
+        .then(any().and_is(just("*/").not()).repeated())
+        .then(just("*/"))
+        .padded()
+        .ignored();
+
+    choice((single_line_comment, multi_line_comment))
+}
 
 #[derive(Default, Debug, Clone, Copy, PartialEq, Eq)]
 enum IdentType {
@@ -458,6 +502,8 @@ impl<'a> chumsky::error::Error<'a, &'a str> for ParserError {
     }
 }
 
+const INVALID_IDENT: &str = "#INVALID#";
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -465,20 +511,7 @@ mod tests {
     #[test]
     fn scheme() {
         let mut ctx = Context::default();
-        let input = r####"
-        addr_none$00 = MsgAddressExt;
-        addr_extern$01 len:(## 9) external_address:(bits len)
-                     = MsgAddressExt;
-        anycast_info$_ depth:(#<= 30) { depth >= 1 }
-           rewrite_pfx:(bits depth) = Anycast;
-        addr_std$10 anycast:(Maybe Anycast)
-           workchain_id:int8 address:bits256  = MsgAddressInt;
-        addr_var$11 anycast:(Maybe Anycast) addr_len:(## 9)
-           workchain_id:int32 address:(bits addr_len) = MsgAddressInt;
-        _ _:MsgAddressInt = MsgAddress;
-        _ _:MsgAddressExt = MsgAddress;
-        "####;
-
+        let input = include_str!("./test/hashmap.tlb");
         let result = ast::Scheme::parse(&mut ctx, input);
         println!("{result:#?}");
     }

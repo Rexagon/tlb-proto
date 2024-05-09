@@ -117,7 +117,7 @@ impl BitPfxCollection {
             Some(&item) => Interval::new(item),
             // Just return other collection if the current is empty
             None => {
-                self.items = other.items.clone();
+                self.items.clone_from(&other.items);
                 return true;
             }
         };
