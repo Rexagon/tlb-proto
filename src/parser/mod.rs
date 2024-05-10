@@ -133,7 +133,12 @@ fn tag<'a>() -> impl Parser<'a, &'a str, ast::ConstructorTag, State> + Clone {
 fn field_list<'a>(
     term: Recursive<dyn Parser<'a, &'a str, ast::TypeExpr, State> + 'a>,
 ) -> impl Parser<'a, &'a str, Vec<ast::Field>, State> + Clone {
-    field(term).padded().repeated().collect()
+    field(term)
+        .padded()
+        .padded_by(comment().repeated())
+        .repeated()
+        .collect()
+        .boxed()
 }
 
 fn field<'a>(
@@ -153,7 +158,7 @@ fn field<'a>(
         expr: Box::new(expr),
     });
 
-    let param = name(IdentType::Lowercase)
+    let param = name(IdentType::Any)
         .then_ignore(just(':').padded())
         .or_not()
         .then(expr_95(term.clone()))
@@ -418,7 +423,7 @@ fn ident<'a>(ty: IdentType) -> impl Parser<'a, &'a str, Symbol, State> + Clone {
     use chumsky::input::MapExtra;
 
     any()
-        .filter(|&c: &char| matches!(c, 'a'..='z' | 'A'..='Z' | '0'..='9' | '_'))
+        .filter(|&c: &char| matches!(c, 'a'..='z' | 'A'..='Z' | '0'..='9' | '_' | '!'))
         .repeated()
         .at_least(1)
         .to_slice()
@@ -427,7 +432,9 @@ fn ident<'a>(ty: IdentType) -> impl Parser<'a, &'a str, Symbol, State> + Clone {
                 if !ident.chars().all(|c| c.is_ascii_digit()) {
                     let first = ident.chars().next().expect("non-empty string");
                     match ty {
-                        IdentType::Lowercase if !first.is_ascii_lowercase() && ident != "_" => {
+                        IdentType::Lowercase
+                            if !first.is_ascii_lowercase() && first != '!' && ident != "_" =>
+                        {
                             emitter.emit(ParserError::LowercastIdentExpected { span: e.span() })
                         }
                         IdentType::Uppercase if !first.is_ascii_uppercase() => {
@@ -523,10 +530,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn scheme() {
+    fn hashmap_scheme() {
         let mut ctx = Context::default();
         let input = include_str!("./test/hashmap.tlb");
         let result = ast::Scheme::parse(&mut ctx, input);
-        println!("{result:#?}");
+        println!("{:#?}", result.unwrap());
+    }
+
+    #[test]
+    fn full_scheme() {
+        let mut ctx = Context::default();
+        let input = include_str!("./test/block.tlb");
+        let result = ast::Scheme::parse(&mut ctx, input);
+        println!("{:#?}", result.unwrap());
     }
 }
