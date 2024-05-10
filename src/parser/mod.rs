@@ -178,6 +178,14 @@ fn term<'a>() -> Recursive<dyn Parser<'a, &'a str, ast::TypeExpr, State> + 'a> {
             expr(term.clone())
                 .padded()
                 .delimited_by(just('('), just(')')),
+            field_list(term.clone())
+                .padded()
+                .delimited_by(just('['), just(']'))
+                .map_with(|fields, e| ast::TypeExpr::AnonConstructor {
+                    span: e.span(),
+                    fields,
+                }),
+            just('#').map_with(|_, e| ast::TypeExpr::Nat { span: e.span() }),
             nat_const().map_with(|value, e| ast::TypeExpr::Const {
                 span: e.span(),
                 value,
@@ -410,7 +418,7 @@ fn ident<'a>(ty: IdentType) -> impl Parser<'a, &'a str, Symbol, State> + Clone {
     use chumsky::input::MapExtra;
 
     any()
-        .filter(|&c: &char| c.is_ascii_alphanumeric() || c == '_')
+        .filter(|&c: &char| matches!(c, 'a'..='z' | 'A'..='Z' | '0'..='9' | '_'))
         .repeated()
         .at_least(1)
         .to_slice()
@@ -442,11 +450,17 @@ fn comment<'a>() -> impl Parser<'a, &'a str, (), State> + Clone {
         .padded()
         .ignored();
 
-    let multi_line_comment = just("/*")
-        .then(any().and_is(just("*/").not()).repeated())
-        .then(just("*/"))
+    let multi_line_comment = recursive(|comment| {
+        choice((
+            comment,
+            none_of('*').ignored(),
+            just('*').then_ignore(none_of('/').rewind()).ignored(),
+        ))
+        .repeated()
+        .ignored()
+        .delimited_by(just("/*"), just("*/"))
         .padded()
-        .ignored();
+    });
 
     choice((single_line_comment, multi_line_comment))
 }

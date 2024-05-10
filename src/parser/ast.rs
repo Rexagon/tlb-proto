@@ -116,7 +116,7 @@ pub enum Field {
 }
 
 /// Type expression.
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Debug, Clone)]
 pub enum TypeExpr {
     /// Integer constant.
     ///
@@ -211,6 +211,12 @@ pub enum TypeExpr {
     /// test field:^(## 64) = Test;
     /// ```
     Ref { span: Span, value: Box<TypeExpr> },
+    /// Anonymous constructor.
+    ///
+    /// ```text
+    /// test [ field:# ] = Test;
+    /// ```
+    AnonConstructor { span: Span, fields: Vec<Field> },
 }
 
 impl TypeExpr {
@@ -226,7 +232,8 @@ impl TypeExpr {
             | Self::GetBit { span, .. }
             | Self::Apply { span, .. }
             | Self::Negate { span, .. }
-            | Self::Ref { span, .. } => *span,
+            | Self::Ref { span, .. }
+            | Self::AnonConstructor { span, .. } => *span,
         }
     }
 }

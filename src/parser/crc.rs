@@ -110,6 +110,13 @@ impl std::fmt::Display for CrcCtx<'_, &'_ TypeExpr> {
             }
             TypeExpr::Negate { value, .. } => write!(f, "~{}", CrcCtx(value.as_ref(), self.1)),
             TypeExpr::Ref { value, .. } => write!(f, "^{}", CrcCtx(value.as_ref(), self.1)),
+            TypeExpr::AnonConstructor { fields, .. } => {
+                f.write_str("[")?;
+                for field in fields {
+                    write!(f, " {}", CrcCtx(field, self.1))?;
+                }
+                f.write_str(" ]")
+            }
         }
     }
 }
@@ -157,12 +164,12 @@ mod tests {
 
         // TODO: Add support for unonymous constructors
 
-        // check_tag(
-        //     r###"
-        //     test {x:#} {y:#} asd:# qwe:(## 4) bbb:(#<= 1) ^[ qqq:# tt:bits256 ] = Test (x + 1) y;
-        //     "###,
-        //     0x3afc7f4c,
-        // );
+        check_tag(
+            r###"
+            test {x:#} {y:#} asd:# qwe:(## 4) bbb:(#<= 1) ^[ qqq:# tt:bits256 ] = Test (x + 1) y;
+            "###,
+            0x3afc7f4c,
+        );
 
         // NOTE: Doesn't work when `WithGuard (x * 2)`
         // TODO: Should reverse the order of the fields
