@@ -3,7 +3,7 @@ use chumsky::prelude::*;
 use chumsky::util::MaybeRef;
 use string_interner::{DefaultBackend, StringInterner};
 
-use self::symbol::Symbol;
+pub use self::symbol::Symbol;
 
 pub mod ast;
 pub mod crc;
@@ -56,7 +56,7 @@ fn scheme<'a>() -> impl Parser<'a, &'a str, ast::Scheme, State> + Clone {
         .padded()
         .padded_by(comment)
         .map(|items| ast::Scheme {
-            declarations: items,
+            constructors: items,
         })
 }
 
@@ -162,9 +162,9 @@ fn field<'a>(
         .then_ignore(just(':').padded())
         .or_not()
         .then(expr_95(term.clone()))
-        .map_with(|(ident, ty), e| ast::Field::Param {
+        .map_with(|(name, ty), e| ast::Field::Param {
             span: e.span(),
-            name: ident,
+            name,
             ty: Box::new(ty),
         });
 
@@ -207,9 +207,9 @@ fn term<'a>() -> Recursive<dyn Parser<'a, &'a str, ast::TypeExpr, State> + 'a> {
                     span: e.span(),
                     value: Box::new(value),
                 }),
-            ident(IdentType::Any).map_with(|ident, e| ast::TypeExpr::Apply {
+            name(IdentType::Any).map_with(|name, e| ast::TypeExpr::Apply {
                 span: e.span(),
-                ident,
+                name,
                 args: Vec::new(),
             }),
         ))
@@ -532,7 +532,7 @@ mod tests {
     #[test]
     fn hashmap_scheme() {
         let mut ctx = Context::default();
-        let input = include_str!("./test/hashmap.tlb");
+        let input = include_str!("../test/hashmap.tlb");
         let result = ast::Scheme::parse(&mut ctx, input);
         println!("{:#?}", result.unwrap());
     }
@@ -540,7 +540,7 @@ mod tests {
     #[test]
     fn full_scheme() {
         let mut ctx = Context::default();
-        let input = include_str!("./test/block.tlb");
+        let input = include_str!("../test/block.tlb");
         let result = ast::Scheme::parse(&mut ctx, input);
         println!("{:#?}", result.unwrap());
     }

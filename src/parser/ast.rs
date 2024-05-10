@@ -22,11 +22,22 @@
 use std::num::NonZeroU8;
 
 use crate::parser::{Span, Symbol};
+use crate::util::Recurse;
 
 #[derive(Debug, Clone)]
 pub struct Scheme {
     /// Constructor declarations.
-    pub declarations: Vec<Constructor>,
+    pub constructors: Vec<Constructor>,
+}
+
+impl Recurse for Scheme {
+    type ArgType = TypeExpr;
+
+    fn recurse<T>(&self, ctx: &mut T, f: fn(ctx: &mut T, expr: &Self::ArgType) -> bool) {
+        for decl in &self.constructors {
+            decl.recurse(ctx, f);
+        }
+    }
 }
 
 /// Object declaration.
@@ -44,6 +55,20 @@ pub struct Constructor {
     pub output_type: Name,
     /// Type arguments for the output type.
     pub output_type_args: Vec<TypeExpr>,
+}
+
+impl Recurse for Constructor {
+    type ArgType = TypeExpr;
+
+    fn recurse<T>(&self, ctx: &mut T, f: fn(ctx: &mut T, expr: &Self::ArgType) -> bool) {
+        for field in &self.fields {
+            field.recurse(ctx, f);
+        }
+
+        for arg in &self.output_type_args {
+            arg.recurse(ctx, f);
+        }
+    }
 }
 
 /// Object constructor tag.
@@ -113,6 +138,17 @@ pub enum Field {
         /// Field type.
         ty: Box<TypeExpr>,
     },
+}
+
+impl Recurse for Field {
+    type ArgType = TypeExpr;
+
+    fn recurse<T>(&self, ctx: &mut T, f: fn(ctx: &mut T, expr: &Self::ArgType) -> bool) {
+        match self {
+            Self::ImplicitParam { .. } => {}
+            Self::Constraint { expr, .. } | Self::Param { ty: expr, .. } => expr.recurse(ctx, f),
+        }
+    }
 }
 
 /// Type expression.
@@ -200,7 +236,7 @@ pub enum TypeExpr {
     /// ```
     Apply {
         span: Span,
-        ident: Symbol,
+        name: Name,
         args: Vec<TypeExpr>,
     },
     /// Negated field.
@@ -234,6 +270,52 @@ impl TypeExpr {
             | Self::Negate { span, .. }
             | Self::Ref { span, .. }
             | Self::AnonConstructor { span, .. } => *span,
+        }
+    }
+}
+
+impl Recurse for TypeExpr {
+    type ArgType = Self;
+
+    fn recurse<T>(&self, ctx: &mut T, f: fn(ctx: &mut T, expr: &Self::ArgType) -> bool) {
+        if f(ctx, self) {
+            match self {
+                TypeExpr::Const { .. } | TypeExpr::Nat { .. } => {}
+
+                TypeExpr::AltNat { arg: value, .. }
+                | TypeExpr::Negate { value, .. }
+                | TypeExpr::Ref { value, .. } => {
+                    value.recurse(ctx, f);
+                }
+
+                TypeExpr::Add { left, right, .. }
+                | TypeExpr::Mul { left, right, .. }
+                | TypeExpr::Constraint { left, right, .. }
+                | TypeExpr::Cond {
+                    cond: left,
+                    value: right,
+                    ..
+                }
+                | TypeExpr::GetBit {
+                    value: left,
+                    bit: right,
+                    ..
+                } => {
+                    left.recurse(ctx, f);
+                    right.recurse(ctx, f);
+                }
+
+                TypeExpr::Apply { args, .. } => {
+                    for arg in args {
+                        arg.recurse(ctx, f);
+                    }
+                }
+                TypeExpr::AnonConstructor { fields, .. } => {
+                    for field in fields {
+                        field.recurse(ctx, f);
+                    }
+                }
+            }
         }
     }
 }

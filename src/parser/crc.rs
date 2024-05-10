@@ -101,8 +101,8 @@ impl std::fmt::Display for CrcCtx<'_, &'_ TypeExpr> {
                 let bit = CrcCtx(bit.as_ref(), self.1);
                 write!(f, "{value}.{bit}")
             }
-            TypeExpr::Apply { ident, args, .. } => {
-                std::fmt::Display::fmt(&CrcCtx(ident, self.1), f)?;
+            TypeExpr::Apply { name, args, .. } => {
+                std::fmt::Display::fmt(&CrcCtx(&name.ident, self.1), f)?;
                 for arg in args {
                     f.write_fmt(format_args!(" {}", CrcCtx(arg, self.1)))?;
                 }
