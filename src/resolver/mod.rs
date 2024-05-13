@@ -4,12 +4,12 @@ use std::rc::Rc;
 use crate::parser::{self, ast, Symbol};
 use crate::util::{BinTrie, BitPfxCollection, FastHashMap, FastHashSet, Recurse, SizeRange};
 
-pub struct Context<'a> {
+pub struct Resolver<'a> {
     parser_context: &'a mut parser::Context,
     types: FastHashMap<Symbol, Rc<Type>>,
 }
 
-impl<'a> Context<'a> {
+impl<'a> Resolver<'a> {
     pub fn new(parser_context: &'a mut parser::Context) -> Self {
         let mut res = Self {
             parser_context,
@@ -44,11 +44,11 @@ impl<'a> Context<'a> {
         impl ResolverContext<'_> {
             fn check_expr(&mut self, expr: &ast::TypeExpr) -> bool {
                 match expr {
-                    ast::TypeExpr::Apply { name, .. } => {
-                        if !self.constructors_by_output.contains_key(&name.ident)
-                            && !self.types.contains_key(&name.ident)
+                    ast::TypeExpr::Apply { ident, .. } => {
+                        if !self.constructors_by_output.contains_key(ident)
+                            && !self.types.contains_key(ident)
                         {
-                            self.unresolved.insert(name.ident);
+                            self.unresolved.insert(*ident);
                         }
 
                         true
@@ -134,6 +134,7 @@ impl<'a> Context<'a> {
             prefix_trie: Default::default(),
             flags: TypeFlags::BUILTIN,
             produces,
+            args: vec![TypeArgFlags::IS_POS | TypeArgFlags::IS_NAT; argc],
         };
         self.types.insert(name, Rc::new(ty));
 
@@ -149,6 +150,7 @@ pub struct Type {
     pub prefix_trie: BinTrie,
     pub flags: TypeFlags,
     pub produces: TypeKind,
+    pub args: Vec<TypeArgFlags>,
 }
 
 impl Type {
@@ -162,6 +164,15 @@ bitflags! {
     pub struct TypeFlags: u32 {
         const BUILTIN = 1 << 0;
         const IS_NAT = 1 << 1;
+    }
+
+    #[derive(Default, Debug, Clone, Copy, Eq, PartialEq)]
+    pub struct TypeArgFlags: u32 {
+        const IS_TYPE = 1 << 0;
+        const IS_NAT = 1 << 1;
+        const IS_POS = 1 << 2;
+        const IS_NEG = 1 << 3;
+        const NON_CONST = 1 << 4;
     }
 }
 
@@ -208,12 +219,6 @@ pub struct TypeExprContext<'a> {
     pub allow_type: bool,
     pub auto_negate: bool,
     pub typecheck: bool,
-}
-
-#[derive(Debug, Clone)]
-enum SymbolValue {
-    Type(Rc<Type>),
-    Param { index: usize, value: Rc<TypeExpr> },
 }
 
 impl TypeExprContext<'_> {
@@ -272,11 +277,17 @@ impl TypeExprContext<'_> {
     }
 }
 
+#[derive(Debug, Clone)]
+pub enum SymbolValue {
+    Type(Rc<Type>),
+    Param { index: usize, value: Rc<TypeExpr> },
+}
+
 #[derive(Debug)]
-struct TypeExpr {
-    span: parser::Span,
-    value: TypeExprValue,
-    flags: TypeExprFlags,
+pub struct TypeExpr {
+    pub span: parser::Span,
+    pub value: TypeExprValue,
+    pub flags: TypeExprFlags,
 }
 
 impl TypeExpr {
@@ -332,7 +343,7 @@ impl TypeExpr {
             None if negate => {
                 return Err(ImportError::TypeMismatch {
                     span: *span,
-                    message: "field identifier expected".to_owned(),
+                    message: "field identifier expected",
                 });
             }
             Some(value) => value,
@@ -344,22 +355,68 @@ impl TypeExpr {
                 if negate {
                     return Err(ImportError::TypeMismatch {
                         span: *span,
-                        message: "cannot negate a type".to_owned(),
+                        message: "cannot negate a type",
                     });
+                }
+
+                if ty.args.len() != args.len() {
+                    return Err(ImportError::TypeMismatch {
+                        span: *span,
+                        message: "type applied with incorrent number of arguments",
+                    });
+                }
+
+                for (arg, flags) in std::iter::zip(&args, &ty.args) {
+                    if arg.is_negated() {
+                        negate = true; // Type can only be negated by its arguments
+
+                        if flags.contains(TypeArgFlags::IS_POS) {
+                            return Err(ImportError::TypeMismatch {
+                                span: arg.span,
+                                message: "passed an argument of incorrect polarity",
+                            });
+                        }
+                        // TODO: *flags |= TypeArgFlags::IS_NEG;
+                    }
+
+                    arg.ensure_no_typecheck()?;
+
+                    if arg.is_nat() {
+                        // TODO: *flags |= TypeArgFlags::IS_NAT;
+                    } else {
+                        // TODO: *flags |= TypeArgFlags::IS_TYPE;
+                        if arg.is_negated() {
+                            return Err(ImportError::TypeMismatch {
+                                span: arg.span,
+                                message: "cannot use negative types as arguments to other types",
+                            });
+                        }
+                    }
                 }
 
                 let mut flags = TypeExprFlags::empty();
                 if ty.is_nat() {
                     flags |= TypeExprFlags::IS_NAT;
                 }
+                if negate {
+                    flags |= TypeExprFlags::NEGATED | TypeExprFlags::TYPECHECK_ONLY;
+                }
 
                 Self {
                     span: *span,
-                    value: TypeExprValue::Apply { ident, args },
+                    value: TypeExprValue::Apply { ty, args },
                     flags,
                 }
             }
             SymbolValue::Param { index, value: ty } => {
+                // NOTE: Params cannot have arguments (yet?)
+                if let Some(arg) = args.first() {
+                    return Err(ImportError::TypeMismatch {
+                        span: arg.span,
+                        message: "cannot apply one expression to the other",
+                    });
+                }
+
                 let field = &ctx.constructor.fields[index];
 
                 if ctx.auto_negate && !field.is_known() {
@@ -370,8 +427,7 @@ impl TypeExpr {
                     return Err(ImportError::TypeMismatch {
                         span: *span,
                         message: "cannot use a field in an expression unless \
-                                it is either an integer or a type"
-                            .to_owned(),
+                                it is either an integer or a type",
                     });
                 }
 
@@ -382,7 +438,7 @@ impl TypeExpr {
 
                 Self {
                     span: *span,
-                    value: TypeExprValue::Apply { ident, args },
+                    value: TypeExprValue::Param { index },
                     flags,
                 }
             }
@@ -408,7 +464,7 @@ impl TypeExpr {
         if !ctx.allow_type {
             return Err(ImportError::TypeMismatch {
                 span: *span,
-                message: "comparison result used as an integer".to_owned(),
+                message: "comparison result used as an integer",
             });
         }
 
@@ -418,14 +474,14 @@ impl TypeExpr {
         if !left_ty.is_nat() {
             return Err(ImportError::TypeMismatch {
                 span: left.span(),
-                message: "cannot apply integer comparison to types".to_owned(),
+                message: "cannot apply integer comparison to types",
             });
         }
 
         if !right_ty.is_nat() {
             return Err(ImportError::TypeMismatch {
                 span: right.span(),
-                message: "cannot apply integer comparison to types".to_owned(),
+                message: "cannot apply integer comparison to types",
             });
         }
 
@@ -450,7 +506,7 @@ impl TypeExpr {
         if !ctx.allow_nat {
             return Err(ImportError::TypeMismatch {
                 span: *span,
-                message: "sum cannot be used as a type expression".to_owned(),
+                message: "sum cannot be used as a type expression",
             });
         }
 
@@ -460,21 +516,21 @@ impl TypeExpr {
         if !left_ty.is_nat() {
             return Err(ImportError::TypeMismatch {
                 span: left.span(),
-                message: "expected natural number".to_owned(),
+                message: "expected natural number",
             });
         }
 
         if !right_ty.is_nat() {
             return Err(ImportError::TypeMismatch {
                 span: right.span(),
-                message: "expected natural number".to_owned(),
+                message: "expected natural number",
             });
         }
 
         if left_ty.is_negated() && right_ty.is_negated() {
             return Err(ImportError::TypeMismatch {
                 span: left.span(),
-                message: "cannot add two values of negative polarity".to_owned(),
+                message: "cannot add two values of negative polarity",
             });
         }
 
@@ -502,7 +558,7 @@ impl TypeExpr {
         if !left_ty.is_nat() {
             return Err(ImportError::TypeMismatch {
                 span: left.span(),
-                message: "cannot apply `*` to types".to_owned(),
+                message: "cannot apply `*` to types",
             });
         }
 
@@ -531,7 +587,7 @@ impl TypeExpr {
                 }
                 _ => Err(ImportError::TypeMismatch {
                     span: *span,
-                    message: "multiplication is allowed only by constant values".to_owned(),
+                    message: "multiplication is allowed only by constant values",
                 }),
             }
         } else {
@@ -559,7 +615,7 @@ impl TypeExpr {
         if !cond_expr.is_nat() {
             return Err(ImportError::TypeMismatch {
                 span: cond.span(),
-                message: "cannot apply `?` with non-integer condition".to_owned(),
+                message: "cannot apply `?` with non-integer condition",
             });
         }
 
@@ -585,7 +641,7 @@ impl TypeExpr {
         if !ctx.allow_nat {
             return Err(ImportError::TypeMismatch {
                 span: *span,
-                message: "sum cannot be used as a type expression".to_owned(),
+                message: "sum cannot be used as a type expression",
             });
         }
 
@@ -595,15 +651,14 @@ impl TypeExpr {
         if !value_expr.is_nat() {
             return Err(ImportError::TypeMismatch {
                 span: value.span(),
-                message: "cannot apply bit selection operator `.` to types".to_owned(),
+                message: "cannot apply bit selection operator `.` to types",
             });
         }
 
         if value_expr.is_negated() || bit_expr.is_negated() {
             return Err(ImportError::TypeMismatch {
                 span: *span,
-                message: "cannot apply bit selection operator `.` to types of negative polarity"
-                    .to_owned(),
+                message: "cannot apply bit selection operator `.` to types of negative polarity",
             });
         }
 
@@ -627,7 +682,7 @@ impl TypeExpr {
         if value_expr.is_nat() {
             return Err(ImportError::TypeMismatch {
                 span: *span,
-                message: "cannot create a cell reference type to a natural number".to_owned(),
+                message: "cannot create a cell reference type to a natural number",
             });
         }
 
@@ -652,7 +707,7 @@ impl TypeExpr {
         if self.flags.contains(TypeExprFlags::TYPECHECK_ONLY) {
             Err(ImportError::TypeMismatch {
                 span: self.span,
-                message: "type expression can be used only in a type-checking context".to_owned(),
+                message: "type expression can be used only in a type-checking context",
             })
         } else {
             Ok(())
@@ -670,15 +725,14 @@ bitflags! {
 }
 
 #[derive(Debug)]
-enum TypeExprValue {
+pub enum TypeExprValue {
     Type,
     Nat,
     Param {
-        ty: ast::GenericType,
         index: usize,
     },
     Apply {
-        ident: Symbol,
+        ty: Rc<Type>,
         args: Vec<Rc<TypeExpr>>,
     },
     Add {
@@ -717,7 +771,10 @@ enum TypeExprValue {
 #[derive(thiserror::Error, Debug)]
 pub enum ImportError {
     #[error("type mismatch: {message}")]
-    TypeMismatch { span: parser::Span, message: String },
+    TypeMismatch {
+        span: parser::Span,
+        message: &'static str,
+    },
     #[error("integer overflow")]
     IntOverflow { span: parser::Span },
 }
@@ -733,7 +790,7 @@ mod tests {
         let mut ctx = parser::Context::default();
         let scheme = ast::Scheme::parse(&mut ctx, input).unwrap();
 
-        let mut ctx = Context::new(&mut ctx);
+        let mut ctx = Resolver::new(&mut ctx);
         ctx.import(&scheme.constructors).unwrap();
     }
 }
