@@ -68,12 +68,26 @@ fn constructor<'a>() -> impl Parser<'a, &'a str, ast::Constructor, State> + Clon
     ));
     let fields = field_list(term.clone());
 
+    let output_type = name(IdentType::Uppercase).padded();
+
+    let output_type_args = just('~')
+        .or_not()
+        .then(term.clone())
+        .map_with(|(negate, ty), e| ast::OutputTypeExpr {
+            span: e.span(),
+            negate: negate.is_some(),
+            ty,
+        })
+        .padded()
+        .repeated()
+        .collect::<Vec<_>>();
+
     name_opt
         .padded()
         .then(fields)
         .then_ignore(just('='))
-        .then(name(IdentType::Uppercase).padded())
-        .then(term.padded().repeated().collect::<Vec<_>>())
+        .then(output_type)
+        .then(output_type_args)
         .then_ignore(just(';'))
         .map_with(
             |((((name, tag), fields), output_type), output_type_args), e| ast::Constructor {
@@ -202,16 +216,14 @@ fn term<'a>() -> Recursive<dyn Parser<'a, &'a str, ast::TypeExpr, State> + 'a> {
                     value: Box::new(value),
                 }),
             just('~')
-                .ignore_then(term)
-                .map_with(|value, e| ast::TypeExpr::Negate {
+                .or_not()
+                .then(ident(IdentType::Any))
+                .map_with(|(negate, ident), e| ast::TypeExpr::Apply {
                     span: e.span(),
-                    value: Box::new(value),
+                    ident,
+                    args: Vec::new(),
+                    negate: negate.is_some(),
                 }),
-            name(IdentType::Any).map_with(|name, e| ast::TypeExpr::Apply {
-                span: e.span(),
-                name,
-                args: Vec::new(),
-            }),
         ))
     })
 }
@@ -280,10 +292,19 @@ fn expr_30<'a>(
         .clone()
         .foldl_with(
             just('*').padded().ignore_then(expr_90).repeated(),
-            |left, right, e| ast::TypeExpr::Mul {
-                span: e.span(),
-                left: Box::new(left),
-                right: Box::new(right),
+            |mut left, mut right, e| {
+                // NOTE: Normalize multiplication to have constant on the left side
+                if !matches!(&left, ast::TypeExpr::Const { .. })
+                    && matches!(&right, ast::TypeExpr::Const { .. })
+                {
+                    std::mem::swap(&mut left, &mut right);
+                }
+
+                ast::TypeExpr::Mul {
+                    span: e.span(),
+                    left: Box::new(left),
+                    right: Box::new(right),
+                }
             },
         )
         .boxed()

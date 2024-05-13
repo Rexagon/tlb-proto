@@ -66,6 +66,15 @@ impl std::fmt::Display for CrcCtx<'_, &'_ Field> {
     }
 }
 
+impl std::fmt::Display for CrcCtx<'_, &'_ OutputTypeExpr> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.0.negate {
+            f.write_str("~")?;
+        }
+        std::fmt::Display::fmt(&CrcCtx(&self.0.ty, self.1), f)
+    }
+}
+
 impl std::fmt::Display for CrcCtx<'_, &'_ TypeExpr> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match &self.0 {
@@ -101,14 +110,21 @@ impl std::fmt::Display for CrcCtx<'_, &'_ TypeExpr> {
                 let bit = CrcCtx(bit.as_ref(), self.1);
                 write!(f, "{value}.{bit}")
             }
-            TypeExpr::Apply { name, args, .. } => {
-                std::fmt::Display::fmt(&CrcCtx(&name.ident, self.1), f)?;
+            TypeExpr::Apply {
+                ident,
+                args,
+                negate,
+                ..
+            } => {
+                if *negate {
+                    f.write_str("~")?;
+                }
+                std::fmt::Display::fmt(&CrcCtx(ident, self.1), f)?;
                 for arg in args {
                     f.write_fmt(format_args!(" {}", CrcCtx(arg, self.1)))?;
                 }
                 Ok(())
             }
-            TypeExpr::Negate { value, .. } => write!(f, "~{}", CrcCtx(value.as_ref(), self.1)),
             TypeExpr::Ref { value, .. } => write!(f, "^{}", CrcCtx(value.as_ref(), self.1)),
             TypeExpr::AnonConstructor { fields, .. } => {
                 f.write_str("[")?;
@@ -171,9 +187,6 @@ mod tests {
             0x3afc7f4c,
         );
 
-        // NOTE: Doesn't work when `WithGuard (x * 2)`
-        // TODO: Should reverse the order of the fields
-
         check_tag(
             r###"
             with_guard {x:#}
@@ -181,7 +194,7 @@ mod tests {
                 other:(#<= 10)
                 { some >= 1 }
                 { other <= some }
-                { other >= some } = WithGuard (2 * x);
+                { other >= some } = WithGuard (x * 2);
             "###,
             0xd0bd258f,
         );

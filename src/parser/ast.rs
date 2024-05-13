@@ -54,7 +54,7 @@ pub struct Constructor {
     /// Output type.
     pub output_type: Name,
     /// Type arguments for the output type.
-    pub output_type_args: Vec<TypeExpr>,
+    pub output_type_args: Vec<OutputTypeExpr>,
 }
 
 impl Recurse for Constructor {
@@ -151,6 +151,22 @@ impl Recurse for Field {
     }
 }
 
+/// Output type expression.
+#[derive(Debug, Clone)]
+pub struct OutputTypeExpr {
+    pub span: Span,
+    pub ty: TypeExpr,
+    pub negate: bool,
+}
+
+impl Recurse for OutputTypeExpr {
+    type ArgType = TypeExpr;
+
+    fn recurse<T>(&self, ctx: &mut T, f: fn(ctx: &mut T, expr: &Self::ArgType) -> bool) {
+        self.ty.recurse(ctx, f);
+    }
+}
+
 /// Type expression.
 #[derive(Debug, Clone)]
 pub enum TypeExpr {
@@ -236,11 +252,10 @@ pub enum TypeExpr {
     /// ```
     Apply {
         span: Span,
-        name: Name,
+        ident: Symbol,
         args: Vec<TypeExpr>,
+        negate: bool,
     },
-    /// Negated field.
-    Negate { span: Span, value: Box<TypeExpr> },
     /// Type serialized into a separate cell.
     ///
     /// ```text
@@ -267,7 +282,6 @@ impl TypeExpr {
             | Self::Cond { span, .. }
             | Self::GetBit { span, .. }
             | Self::Apply { span, .. }
-            | Self::Negate { span, .. }
             | Self::Ref { span, .. }
             | Self::AnonConstructor { span, .. } => *span,
         }
@@ -282,9 +296,7 @@ impl Recurse for TypeExpr {
             match self {
                 TypeExpr::Const { .. } | TypeExpr::Nat { .. } => {}
 
-                TypeExpr::AltNat { arg: value, .. }
-                | TypeExpr::Negate { value, .. }
-                | TypeExpr::Ref { value, .. } => {
+                TypeExpr::AltNat { arg: value, .. } | TypeExpr::Ref { value, .. } => {
                     value.recurse(ctx, f);
                 }
 
