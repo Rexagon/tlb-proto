@@ -1,118 +1,67 @@
-use bitflags::bitflags;
 use std::rc::Rc;
 
+use bitflags::bitflags;
+
 use crate::parser::{self, ast, Symbol};
-use crate::util::{BinTrie, BitPfxCollection, FastHashMap, FastHashSet, Recurse, SizeRange};
+use crate::util::{BinTrie, BitPfxCollection, FastHashMap, SizeRange};
 
 pub struct Resolver<'a> {
+    global: GlobalSymbolTable,
     parser_context: &'a mut parser::Context,
-    types: FastHashMap<Symbol, Rc<Type>>,
 }
 
 impl<'a> Resolver<'a> {
     pub fn new(parser_context: &'a mut parser::Context) -> Self {
         let mut res = Self {
+            global: Default::default(),
             parser_context,
-            types: FastHashMap::default(),
         };
         res.def_builtin_types().unwrap();
         res
     }
 
-    pub fn import(&mut self, constructors: &[ast::Constructor]) -> Result<(), ImportError> {
-        // Group constructors by output type name
-        let mut constructors_by_output =
-            FastHashMap::<Symbol, Vec<&ast::Constructor>>::with_capacity_and_hasher(
-                constructors.len(),
-                Default::default(),
-            );
-
-        for constructor in constructors {
-            constructors_by_output
-                .entry(constructor.output_type.ident)
-                .or_default()
-                .push(constructor);
+    pub fn import(&mut self, scheme: &ast::Scheme) -> Result<(), ImportError> {
+        for ast in &scheme.constructors {
+            self.def_constructor(ast)?;
         }
-
-        // Start importing constructors
-        struct ResolverContext<'a> {
-            types: &'a FastHashMap<Symbol, Rc<Type>>,
-            constructors_by_output: &'a FastHashMap<Symbol, Vec<&'a ast::Constructor>>,
-            unresolved: FastHashSet<Symbol>,
-        }
-
-        impl ResolverContext<'_> {
-            fn check_expr(&mut self, expr: &ast::TypeExpr) -> bool {
-                match expr {
-                    ast::TypeExpr::Apply { ident, .. } => {
-                        if !self.constructors_by_output.contains_key(ident)
-                            && !self.types.contains_key(ident)
-                        {
-                            self.unresolved.insert(*ident);
-                        }
-
-                        true
-                    }
-                    ast::TypeExpr::Constraint { .. } => false,
-                    ast::TypeExpr::Cond { value, .. } => {
-                        value.recurse(self, Self::check_expr);
-                        false
-                    }
-                    ast::TypeExpr::GetBit { .. } => false,
-                    _ => true,
-                }
-            }
-        }
-
-        let mut ctx = ResolverContext {
-            types: &self.types,
-            constructors_by_output: &constructors_by_output,
-            unresolved: FastHashSet::default(),
-        };
-        for constructor in constructors {
-            constructor.recurse(&mut ctx, ResolverContext::check_expr);
-        }
-
-        // TEMP
-        for name in ctx.unresolved {
-            println!(
-                "Unresolved type: {:?}",
-                self.parser_context.resolve_symbol(name)
-            );
-        }
-
         Ok(())
     }
 
-    pub fn get_type(&self, symbol: Symbol) -> Option<&Rc<Type>> {
-        self.types.get(&symbol)
+    pub fn get_type(&self, symbol: Symbol) -> Option<&Type> {
+        self.global.lookup(&symbol)
     }
 
-    pub fn get_type_by_name(&self, name: &str) -> Option<&Rc<Type>> {
+    pub fn get_type_by_name(&self, name: &str) -> Option<&Type> {
         self.parser_context
             .get_symbol(name)
             .and_then(|symbol| self.get_type(symbol))
     }
 
     fn def_builtin_types(&mut self) -> Result<(), ImportError> {
-        self.def_builtin_type("Any", 0, SizeRange::any(), TypeKind::Type)?;
-        self.def_builtin_type("Cell", 0, SizeRange::exact_refs(1), TypeKind::Type)?;
+        self.def_builtin_type("Any", &[], SizeRange::any(), TypeKind::Type)?;
+        self.def_builtin_type("Cell", &[], SizeRange::exact_refs(1), TypeKind::Type)?;
 
-        self.def_builtin_type("int", 1, SizeRange::bits(0..=257), TypeKind::Int)?;
-        self.def_builtin_type("uint", 1, SizeRange::bits(0..=256), TypeKind::Int)?;
-        self.def_builtin_type("bits", 1, SizeRange::bits(0..=1023), TypeKind::Type)?;
+        let nat_arg = TypeArgFlags::IS_POS | TypeArgFlags::IS_NAT;
+        self.def_builtin_type("int", &[nat_arg], SizeRange::bits(0..=257), TypeKind::Int)?;
+        self.def_builtin_type("uint", &[nat_arg], SizeRange::bits(0..=256), TypeKind::Int)?;
+        self.def_builtin_type(
+            "bits",
+            &[nat_arg],
+            SizeRange::bits(0..=1023),
+            TypeKind::Type,
+        )?;
 
         for i in 0..=257 {
             let name = format!("uint{i}");
-            self.def_builtin_type(&name[1..], 0, SizeRange::exact_bits(i), TypeKind::Int)?;
+            self.def_builtin_type(&name[1..], &[], SizeRange::exact_bits(i), TypeKind::Int)?;
             if i <= 256 {
-                self.def_builtin_type(&name, 0, SizeRange::exact_bits(i), TypeKind::Int)?;
+                self.def_builtin_type(&name, &[], SizeRange::exact_bits(i), TypeKind::Int)?;
             }
         }
 
         for i in 0..=1023 {
             let name = format!("bits{i}");
-            self.def_builtin_type(&name, 0, SizeRange::exact_bits(i), TypeKind::Int)?;
+            self.def_builtin_type(&name, &[], SizeRange::exact_bits(i), TypeKind::Int)?;
         }
 
         Ok(())
@@ -121,22 +70,106 @@ impl<'a> Resolver<'a> {
     fn def_builtin_type(
         &mut self,
         name: &str,
-        argc: usize,
+        args: &[TypeArgFlags],
         size: SizeRange,
         produces: TypeKind,
     ) -> Result<(), ImportError> {
         let name = self.parser_context.intern_symbol(name);
 
-        let ty = Type {
+        let ty = Box::new(Type {
             size,
             constructors: Vec::new(),
             starts_with: BitPfxCollection::all(),
             prefix_trie: Default::default(),
             flags: TypeFlags::BUILTIN,
             produces,
-            args: vec![TypeArgFlags::IS_POS | TypeArgFlags::IS_NAT; argc],
+            args: args.to_vec(),
+        });
+        self.global.register_type(name, ty);
+
+        Ok(())
+    }
+
+    fn def_constructor(&mut self, ast: &ast::Constructor) -> Result<(), ImportError> {
+        let mut constructor = Constructor {
+            name: ast.name.map(|name| name.ident),
+            size: SizeRange::any(),
+            starts_with: Default::default(),
+            fields: Vec::with_capacity(ast.fields.len()),
+            output_type: ast.output_type.ident,
+            output_type_args: Vec::with_capacity(ast.output_type_args.len()),
         };
-        self.types.insert(name, Rc::new(ty));
+
+        let ctx = &mut TypeExprContext {
+            constructor: &mut constructor,
+            scope: &mut self.global.begin_scope(),
+            allow_nat: true,
+            allow_type: true,
+            auto_negate: false,
+            typecheck: false,
+        };
+
+        // Parse fields list
+        for (field_index, field) in ast.fields.iter().enumerate() {
+            let name_ident = match field.name_ident() {
+                Some(ident) => ident,
+                None => self
+                    .parser_context
+                    .intern_symbol(format!("__field{field_index}")),
+            };
+
+            if ctx.scope.local.lookup(name_ident).is_some() {
+                return Err(ImportError::TypeMismatch {
+                    span: field.span(),
+                    message: "redefined field or parameter",
+                });
+            }
+
+            let parsed_field = match field {
+                ast::Field::ImplicitParam { span, ty, .. } => Field::new_implicit_param(*ty, span),
+                ast::Field::Constraint { expr, .. } => Field::new_constraint(expr, ctx)?,
+                ast::Field::Param { ty, .. } => Field::new_param(ty, ctx)?,
+            };
+
+            ctx.scope.local.register_param(
+                name_ident,
+                LocalSymbol {
+                    index: field_index,
+                    value: parsed_field.ty.clone(),
+                },
+            );
+
+            ctx.constructor.fields.push(parsed_field);
+        }
+
+        // Define output type
+        let _ty = ctx
+            .scope
+            .global
+            .register_type(ast.output_type.ident, Default::default());
+
+        // Parse output type args
+        for ast in &ast.output_type_args {
+            let mut ctx = ctx.expect_any();
+            ctx.auto_negate = !ast.negate;
+
+            let arg = TypeExpr::new(&ast.ty, &mut ctx)?;
+
+            // TODO: Bind value
+
+            let const_value = match &arg.value {
+                TypeExprValue::IntConst { value } if !ast.negate => Some(*value),
+                _ => None,
+            };
+
+            ctx.constructor.output_type_args.push(OutputTypeArg {
+                ty: Rc::new(arg),
+                negate: ast.negate,
+                const_value,
+            });
+        }
+
+        // TODO: Bind constructor
 
         Ok(())
     }
@@ -151,6 +184,20 @@ pub struct Type {
     pub flags: TypeFlags,
     pub produces: TypeKind,
     pub args: Vec<TypeArgFlags>,
+}
+
+impl Default for Type {
+    fn default() -> Self {
+        Self {
+            size: SizeRange::any(),
+            constructors: Vec::new(),
+            starts_with: BitPfxCollection::all(),
+            prefix_trie: Default::default(),
+            flags: TypeFlags::empty(),
+            produces: TypeKind::Type,
+            args: Vec::new(),
+        }
+    }
 }
 
 impl Type {
@@ -178,10 +225,10 @@ bitflags! {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TypeKind {
+    Type,
     Unit,
     Bool,
     Int,
-    Type,
 }
 
 #[derive(Debug)]
@@ -190,14 +237,55 @@ pub struct Constructor {
     pub size: SizeRange,
     pub starts_with: BitPfxCollection,
     pub fields: Vec<Field>,
+    pub output_type: Symbol,
+    pub output_type_args: Vec<OutputTypeArg>,
+}
+
+#[derive(Debug)]
+pub struct OutputTypeArg {
+    pub ty: Rc<TypeExpr>,
+    pub negate: bool,
+    pub const_value: Option<u32>,
 }
 
 #[derive(Debug)]
 pub struct Field {
-    flags: FieldFlags,
+    pub ty: Rc<TypeExpr>,
+    pub flags: FieldFlags,
 }
 
 impl Field {
+    pub fn new_implicit_param(ty: ast::GenericType, span: &parser::Span) -> Self {
+        Self {
+            ty: Rc::new(match ty {
+                ast::GenericType::Type => TypeExpr::new_type(span),
+                ast::GenericType::Nat => TypeExpr::new_nat(span),
+            }),
+            flags: FieldFlags::IS_IMPLICIT,
+        }
+    }
+
+    pub fn new_constraint(
+        expr: &ast::TypeExpr,
+        ctx: &mut TypeExprContext,
+    ) -> Result<Self, ImportError> {
+        let expr = TypeExpr::new(expr, &mut ctx.expect_only_type().with_typecheck())?;
+
+        Ok(Self {
+            ty: Rc::new(expr),
+            flags: FieldFlags::IS_CONSTRAINT,
+        })
+    }
+
+    pub fn new_param(expr: &ast::TypeExpr, ctx: &mut TypeExprContext) -> Result<Self, ImportError> {
+        let expr = TypeExpr::new(expr, &mut ctx.expect_only_type().with_typecheck())?;
+
+        Ok(Self {
+            ty: Rc::new(expr),
+            flags: FieldFlags::empty(),
+        })
+    }
+
     pub fn is_known(&self) -> bool {
         self.flags.contains(FieldFlags::IS_KNOWN)
     }
@@ -206,81 +294,11 @@ impl Field {
 bitflags! {
     #[derive(Default, Debug, Clone, Copy, Eq, PartialEq)]
     pub struct FieldFlags: u32 {
-        const IS_KNOWN = 1 << 0;
+        const IS_IMPLICIT = 1 << 0;
+        const IS_CONSTRAINT = 1 << 1;
+        const IS_KNOWN = 1 << 2;
+        const IS_USED = 1 << 3;
     }
-}
-
-#[derive(Debug)]
-pub struct TypeExprContext<'a> {
-    pub constructor: &'a mut Constructor,
-    pub global_symbols: &'a mut FastHashMap<Symbol, Rc<Type>>,
-    pub local_symbols: &'a mut FastHashMap<Symbol, SymbolValue>,
-    pub allow_nat: bool,
-    pub allow_type: bool,
-    pub auto_negate: bool,
-    pub typecheck: bool,
-}
-
-impl TypeExprContext<'_> {
-    fn lookup(&self, symbol: Symbol) -> Option<SymbolValue> {
-        self.local_symbols.get(&symbol).cloned().or_else(|| {
-            self.global_symbols
-                .get(&symbol)
-                .cloned()
-                .map(SymbolValue::Type)
-        })
-    }
-
-    fn without_typecheck(&'_ mut self) -> TypeExprContext<'_> {
-        let mut res = self.subcontext();
-        res.typecheck = false;
-        res
-    }
-
-    fn with_typecheck(&'_ mut self) -> TypeExprContext<'_> {
-        let mut res = self.subcontext();
-        res.typecheck = true;
-        res
-    }
-
-    fn expect_any(&'_ mut self) -> TypeExprContext<'_> {
-        let mut res = self.subcontext();
-        res.allow_nat = true;
-        res.allow_type = true;
-        res
-    }
-
-    fn expect_only_nat(&'_ mut self) -> TypeExprContext<'_> {
-        let mut res = self.subcontext();
-        res.allow_nat = true;
-        res.allow_type = false;
-        res
-    }
-
-    fn expect_only_type(&'_ mut self) -> TypeExprContext<'_> {
-        let mut res = self.subcontext();
-        res.allow_nat = false;
-        res.allow_type = true;
-        res
-    }
-
-    fn subcontext(&'_ mut self) -> TypeExprContext<'_> {
-        TypeExprContext {
-            constructor: self.constructor,
-            global_symbols: self.global_symbols,
-            local_symbols: self.local_symbols,
-            allow_nat: self.allow_nat,
-            allow_type: self.allow_type,
-            auto_negate: self.auto_negate,
-            typecheck: self.typecheck,
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-pub enum SymbolValue {
-    Type(Rc<Type>),
-    Param { index: usize, value: Rc<TypeExpr> },
 }
 
 #[derive(Debug)]
@@ -295,7 +313,7 @@ impl TypeExpr {
         match ast {
             ast::TypeExpr::Const { span, value } => Ok(Self::new_const(*value, span)),
             ast::TypeExpr::Nat { span } => Ok(Self::new_nat(span)),
-            ast::TypeExpr::AltNat { span, kind, arg } => todo!(),
+            ast::TypeExpr::AltNat { span, kind, arg } => Self::new_alt_nat(*kind, arg, span, ctx),
             ast::TypeExpr::Add { span, left, right } => Self::new_add(left, right, span, ctx),
             ast::TypeExpr::Mul { span, left, right } => Self::new_mul(left, right, span, ctx),
             ast::TypeExpr::Constraint {
@@ -313,7 +331,7 @@ impl TypeExpr {
                 negate,
             } => Self::new_apply(*ident, args, *negate, span, ctx),
             ast::TypeExpr::Ref { span, value } => Self::new_ref(value, span, ctx),
-            ast::TypeExpr::AnonConstructor { span, fields } => todo!(),
+            ast::TypeExpr::AnonConstructor { .. } => todo!(),
         }
     }
 
@@ -339,19 +357,19 @@ impl TypeExpr {
                 .collect::<Result<Vec<_>, _>>()?
         };
 
-        let value = match ctx.lookup(ident) {
+        let value = match ctx.scope.lookup_mut(ident) {
             None if negate => {
                 return Err(ImportError::TypeMismatch {
                     span: *span,
                     message: "field identifier expected",
                 });
             }
+            None => ctx.scope.register_type(ident, Default::default()),
             Some(value) => value,
-            None => todo!("implicitly define new type"),
         };
 
         Ok(match value {
-            SymbolValue::Type(ty) => {
+            SymbolValue::Type { type_id, ty } => {
                 if negate {
                     return Err(ImportError::TypeMismatch {
                         span: *span,
@@ -366,7 +384,7 @@ impl TypeExpr {
                     });
                 }
 
-                for (arg, flags) in std::iter::zip(&args, &ty.args) {
+                for (arg, flags) in std::iter::zip(&args, &mut ty.args) {
                     if arg.is_negated() {
                         negate = true; // Type can only be negated by its arguments
 
@@ -376,15 +394,16 @@ impl TypeExpr {
                                 message: "passed an argument of incorrect polarity",
                             });
                         }
-                        // TODO: *flags |= TypeArgFlags::IS_NEG;
+                        *flags |= TypeArgFlags::IS_NEG;
                     }
 
                     arg.ensure_no_typecheck()?;
 
                     if arg.is_nat() {
-                        // TODO: *flags |= TypeArgFlags::IS_NAT;
+                        *flags |= TypeArgFlags::IS_NAT;
                     } else {
-                        // TODO: *flags |= TypeArgFlags::IS_TYPE;
+                        *flags |= TypeArgFlags::IS_TYPE;
+
                         if arg.is_negated() {
                             return Err(ImportError::TypeMismatch {
                                 span: arg.span,
@@ -404,7 +423,7 @@ impl TypeExpr {
 
                 Self {
                     span: *span,
-                    value: TypeExprValue::Apply { ty, args },
+                    value: TypeExprValue::Apply { type_id, args },
                     flags,
                 }
             }
@@ -445,12 +464,54 @@ impl TypeExpr {
         })
     }
 
+    fn new_type(span: &parser::Span) -> Self {
+        Self {
+            span: *span,
+            value: TypeExprValue::Type,
+            flags: TypeExprFlags::empty(),
+        }
+    }
+
     fn new_nat(span: &parser::Span) -> Self {
         Self {
             span: *span,
             value: TypeExprValue::Nat,
             flags: TypeExprFlags::IS_NAT,
         }
+    }
+
+    fn new_alt_nat(
+        kind: ast::AltNat,
+        arg: &ast::TypeExpr,
+        span: &parser::Span,
+        ctx: &mut TypeExprContext,
+    ) -> Result<Self, ImportError> {
+        let arg = Self::new(arg, &mut ctx.expect_only_nat())?;
+
+        if arg.is_negated() {
+            return Err(ImportError::TypeMismatch {
+                span: arg.span,
+                message: "passed an argument of incorrect polarity",
+            });
+        }
+
+        if !arg.is_nat() {
+            return Err(ImportError::TypeMismatch {
+                span: arg.span,
+                message: "expected natural number",
+            });
+        }
+
+        arg.ensure_no_typecheck()?;
+
+        Ok(Self {
+            span: *span,
+            value: TypeExprValue::AltNat {
+                kind,
+                arg: Rc::new(arg),
+            },
+            flags: TypeExprFlags::IS_NAT,
+        })
     }
 
     fn new_constraint(
@@ -728,11 +789,15 @@ bitflags! {
 pub enum TypeExprValue {
     Type,
     Nat,
+    AltNat {
+        kind: ast::AltNat,
+        arg: Rc<TypeExpr>,
+    },
     Param {
         index: usize,
     },
     Apply {
-        ty: Rc<Type>,
+        type_id: Symbol,
         args: Vec<Rc<TypeExpr>>,
     },
     Add {
@@ -768,6 +833,151 @@ pub enum TypeExprValue {
     },
 }
 
+#[derive(Debug)]
+pub struct TypeExprContext<'a, 's> {
+    pub constructor: &'a mut Constructor,
+    pub scope: &'a mut SymbolTableScope<'s>,
+    pub allow_nat: bool,
+    pub allow_type: bool,
+    pub auto_negate: bool,
+    pub typecheck: bool,
+}
+
+impl<'s> TypeExprContext<'_, 's> {
+    fn without_typecheck(&'_ mut self) -> TypeExprContext<'_, 's> {
+        let mut res = self.subcontext();
+        res.typecheck = false;
+        res
+    }
+
+    fn with_typecheck(&'_ mut self) -> TypeExprContext<'_, 's> {
+        let mut res = self.subcontext();
+        res.typecheck = true;
+        res
+    }
+
+    fn expect_any(&'_ mut self) -> TypeExprContext<'_, 's> {
+        let mut res = self.subcontext();
+        res.allow_nat = true;
+        res.allow_type = true;
+        res
+    }
+
+    fn expect_only_nat(&'_ mut self) -> TypeExprContext<'_, 's> {
+        let mut res = self.subcontext();
+        res.allow_nat = true;
+        res.allow_type = false;
+        res
+    }
+
+    fn expect_only_type(&'_ mut self) -> TypeExprContext<'_, 's> {
+        let mut res = self.subcontext();
+        res.allow_nat = false;
+        res.allow_type = true;
+        res
+    }
+
+    fn subcontext(&'_ mut self) -> TypeExprContext<'_, 's> {
+        TypeExprContext {
+            constructor: self.constructor,
+            scope: self.scope,
+            allow_nat: self.allow_nat,
+            allow_type: self.allow_type,
+            auto_negate: self.auto_negate,
+            typecheck: self.typecheck,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct SymbolTableScope<'a> {
+    global: &'a mut GlobalSymbolTable,
+    local: LocalSymbolTable,
+}
+
+impl SymbolTableScope<'_> {
+    pub fn lookup_mut(&mut self, symbol: Symbol) -> Option<SymbolValue<'_>> {
+        if let Some(local) = self.local.symbols.get(&symbol) {
+            return Some(SymbolValue::Param {
+                index: local.index,
+                value: local.value.as_ref(),
+            });
+        }
+
+        self.global
+            .symbols
+            .get_mut(&symbol)
+            .map(|ty| SymbolValue::Type {
+                type_id: symbol,
+                ty,
+            })
+    }
+
+    pub fn register_type(&mut self, symbol: Symbol, ty: Box<Type>) -> SymbolValue<'_> {
+        let ty = self.global.register_type(symbol, ty);
+        SymbolValue::Type {
+            type_id: symbol,
+            ty,
+        }
+    }
+
+    pub fn register_param(&mut self, symbol: Symbol, value: LocalSymbol) -> SymbolValue<'_> {
+        let local = self.local.register_param(symbol, value);
+        SymbolValue::Param {
+            index: local.index,
+            value: local.value.as_ref(),
+        }
+    }
+}
+
+#[derive(Default, Debug)]
+pub struct LocalSymbolTable {
+    symbols: FastHashMap<Symbol, LocalSymbol>,
+}
+
+impl LocalSymbolTable {
+    pub fn lookup(&self, symbol: Symbol) -> Option<&LocalSymbol> {
+        self.symbols.get(&symbol)
+    }
+
+    pub fn register_param(&mut self, symbol: Symbol, value: LocalSymbol) -> &mut LocalSymbol {
+        self.symbols.entry(symbol).or_insert(value)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct LocalSymbol {
+    pub index: usize,
+    pub value: Rc<TypeExpr>,
+}
+
+#[derive(Default, Debug)]
+pub struct GlobalSymbolTable {
+    symbols: FastHashMap<Symbol, Box<Type>>,
+}
+
+impl GlobalSymbolTable {
+    pub fn begin_scope(&mut self) -> SymbolTableScope<'_> {
+        SymbolTableScope {
+            global: self,
+            local: LocalSymbolTable::default(),
+        }
+    }
+
+    pub fn lookup(&self, symbol: &Symbol) -> Option<&Type> {
+        self.symbols.get(symbol).map(|ty| ty.as_ref())
+    }
+
+    pub fn register_type(&mut self, symbol: Symbol, ty: Box<Type>) -> &mut Type {
+        self.symbols.entry(symbol).or_insert(ty)
+    }
+}
+
+pub enum SymbolValue<'a> {
+    Type { type_id: Symbol, ty: &'a mut Type },
+    Param { index: usize, value: &'a TypeExpr },
+}
+
 #[derive(thiserror::Error, Debug)]
 pub enum ImportError {
     #[error("type mismatch: {message}")]
@@ -784,6 +994,24 @@ mod tests {
     use super::*;
 
     #[test]
+    fn simple() {
+        let input = r###"
+        test field:# = Test;
+        "###;
+
+        let mut ctx = parser::Context::default();
+        let scheme = ast::Scheme::parse(&mut ctx, input).unwrap();
+
+        let mut ctx = Resolver::new(&mut ctx);
+        ctx.import(&scheme).unwrap();
+
+        for (symbol, ty) in &ctx.global.symbols {
+            let name = ctx.parser_context.resolve_symbol(*symbol).unwrap();
+            println!("{name}: {ty:?}");
+        }
+    }
+
+    #[test]
     fn full_block() {
         let input = include_str!("../test/block.tlb");
 
@@ -791,6 +1019,6 @@ mod tests {
         let scheme = ast::Scheme::parse(&mut ctx, input).unwrap();
 
         let mut ctx = Resolver::new(&mut ctx);
-        ctx.import(&scheme.constructors).unwrap();
+        ctx.import(&scheme).unwrap();
     }
 }

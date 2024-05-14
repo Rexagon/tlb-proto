@@ -140,6 +140,24 @@ pub enum Field {
     },
 }
 
+impl Field {
+    pub fn name_ident(&self) -> Option<Symbol> {
+        match self {
+            Field::ImplicitParam { ident, .. } => Some(*ident),
+            Field::Constraint { .. } => None,
+            Field::Param { name, .. } => name.map(|n| n.ident),
+        }
+    }
+
+    pub fn span(&self) -> Span {
+        match self {
+            Field::ImplicitParam { span, .. }
+            | Field::Constraint { span, .. }
+            | Field::Param { span, .. } => *span,
+        }
+    }
+}
+
 impl Recurse for Field {
     type ArgType = TypeExpr;
 
