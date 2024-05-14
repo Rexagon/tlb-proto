@@ -38,30 +38,55 @@ impl<'a> Resolver<'a> {
     }
 
     fn def_builtin_types(&mut self) -> Result<(), ImportError> {
-        self.def_builtin_type("Any", &[], SizeRange::any(), TypeKind::Type)?;
-        self.def_builtin_type("Cell", &[], SizeRange::exact_refs(1), TypeKind::Type)?;
+        self.def_builtin_type("Any", &[], SizeRange::any(), TypeFlags::empty())?;
+        self.def_builtin_type("Cell", &[], SizeRange::exact_refs(1), TypeFlags::empty())?;
 
         let nat_arg = TypeArgFlags::IS_POS | TypeArgFlags::IS_NAT;
-        self.def_builtin_type("int", &[nat_arg], SizeRange::bits(0..=257), TypeKind::Int)?;
-        self.def_builtin_type("uint", &[nat_arg], SizeRange::bits(0..=256), TypeKind::Int)?;
+        self.def_builtin_type(
+            "int",
+            &[nat_arg],
+            SizeRange::bits(0..=257),
+            TypeFlags::PRODUCES_NAT,
+        )?;
+        self.def_builtin_type(
+            "uint",
+            &[nat_arg],
+            SizeRange::bits(0..=256),
+            TypeFlags::PRODUCES_NAT,
+        )?;
         self.def_builtin_type(
             "bits",
             &[nat_arg],
             SizeRange::bits(0..=1023),
-            TypeKind::Type,
+            TypeFlags::PRODUCES_NAT,
         )?;
 
         for i in 0..=257 {
             let name = format!("uint{i}");
-            self.def_builtin_type(&name[1..], &[], SizeRange::exact_bits(i), TypeKind::Int)?;
+            self.def_builtin_type(
+                &name[1..],
+                &[],
+                SizeRange::exact_bits(i),
+                TypeFlags::PRODUCES_NAT,
+            )?;
             if i <= 256 {
-                self.def_builtin_type(&name, &[], SizeRange::exact_bits(i), TypeKind::Int)?;
+                self.def_builtin_type(
+                    &name,
+                    &[],
+                    SizeRange::exact_bits(i),
+                    TypeFlags::PRODUCES_NAT,
+                )?;
             }
         }
 
         for i in 0..=1023 {
             let name = format!("bits{i}");
-            self.def_builtin_type(&name, &[], SizeRange::exact_bits(i), TypeKind::Int)?;
+            self.def_builtin_type(
+                &name,
+                &[],
+                SizeRange::exact_bits(i),
+                TypeFlags::PRODUCES_NAT,
+            )?;
         }
 
         Ok(())
@@ -72,7 +97,7 @@ impl<'a> Resolver<'a> {
         name: &str,
         args: &[TypeArgFlags],
         size: SizeRange,
-        produces: TypeKind,
+        flags: TypeFlags,
     ) -> Result<(), ImportError> {
         let name = self.parser_context.intern_symbol(name);
 
@@ -81,8 +106,7 @@ impl<'a> Resolver<'a> {
             constructors: Vec::new(),
             starts_with: BitPfxCollection::all(),
             prefix_trie: Default::default(),
-            flags: TypeFlags::BUILTIN,
-            produces,
+            flags: flags | TypeFlags::BUILTIN,
             args: args.to_vec(),
         });
         self.global.register_type(name, ty);
@@ -111,6 +135,7 @@ impl<'a> Resolver<'a> {
         };
 
         // Parse fields list
+        let mut field_flags = Vec::with_capacity(ast.fields.len());
         for (field_index, field) in ast.fields.iter().enumerate() {
             let name_ident = match field.name_ident() {
                 Some(ident) => ident,
@@ -131,6 +156,8 @@ impl<'a> Resolver<'a> {
                 ast::Field::Constraint { expr, .. } => Field::new_constraint(expr, ctx)?,
                 ast::Field::Param { ty, .. } => Field::new_param(ty, ctx)?,
             };
+
+            field_flags.push(parsed_field.flags);
 
             ctx.scope.local.register_param(
                 name_ident,
@@ -155,7 +182,14 @@ impl<'a> Resolver<'a> {
 
             let arg = TypeExpr::new(&ast.ty, &mut ctx)?;
 
-            // TODO: Bind value
+            if !ast.negate {
+                arg.bind_value(&mut field_flags, false, false)?;
+            } else if !arg.is_nat() {
+                return Err(ImportError::TypeMismatch {
+                    span: ast.ty.span(),
+                    message: "cannot negate a type",
+                });
+            }
 
             let const_value = match &arg.value {
                 TypeExprValue::IntConst { value } if !ast.negate => Some(*value),
@@ -170,7 +204,7 @@ impl<'a> Resolver<'a> {
         }
 
         if let Some(ty) = self.global.lookup_mut(ast.output_type.ident) {
-            ty.bind_constructor(constructor, &ast.span)?;
+            ty.bind_constructor(constructor, &mut field_flags, &ast.span)?;
         }
 
         Ok(())
@@ -184,7 +218,6 @@ pub struct Type {
     pub starts_with: BitPfxCollection,
     pub prefix_trie: BinTrie,
     pub flags: TypeFlags,
-    pub produces: TypeKind,
     pub args: Vec<TypeArgFlags>,
 }
 
@@ -196,21 +229,20 @@ impl Default for Type {
             starts_with: BitPfxCollection::all(),
             prefix_trie: Default::default(),
             flags: TypeFlags::empty(),
-            produces: TypeKind::Type,
             args: Vec::new(),
         }
     }
 }
 
 impl Type {
-    pub fn bind_constructor(
+    fn bind_constructor(
         &mut self,
         mut constructor: Box<Constructor>,
+        field_flags: &mut [FieldFlags],
         span: &parser::Span,
     ) -> Result<(), ImportError> {
         // Check type arguments arity
-        if self.constructors.is_empty() {
-            debug_assert!(self.args.is_empty());
+        if self.constructors.is_empty() && self.args.is_empty() {
             self.args
                 .resize(constructor.output_type_args.len(), TypeArgFlags::empty());
         } else if self.args.len() != constructor.output_type_args.len() {
@@ -258,15 +290,14 @@ impl Type {
 
         // Check fields
         let mut has_explicit_fields = false;
-        for field in &mut constructor.fields {
-            if field.is_constraint() {
-                // TODO: Bind value
-                field.flags |= FieldFlags::IS_KNOWN;
-            } else if !field.is_implicit() {
-                has_explicit_fields = true;
-                // TODO: Bind value
-                field.flags |= FieldFlags::IS_KNOWN;
+        for (i, field) in constructor.fields.iter_mut().enumerate() {
+            if field.is_constraint() || !field.is_implicit() {
+                field.ty.bind_value(field_flags, false, true)?;
+                field_flags[i] |= FieldFlags::IS_KNOWN;
             }
+
+            has_explicit_fields |= !field.is_implicit();
+            field.flags |= field_flags[i];
         }
 
         if !has_explicit_fields {
@@ -280,12 +311,14 @@ impl Type {
         // Bind type arguments
         for arg in &constructor.output_type_args {
             if arg.negate {
-                // TODO: Bind value
+                arg.ty.bind_value(field_flags, true, false)?;
             }
         }
 
-        // Check known fields
-        for field in &constructor.fields {
+        // Apply modified field flags and check known fields
+        for (field, flags) in std::iter::zip(&mut constructor.fields, field_flags) {
+            field.flags |= *flags;
+
             if !field.is_known() {
                 return Err(ImportError::TypeMismatch {
                     span: field.ty.span,
@@ -317,8 +350,8 @@ impl Type {
         self.flags.contains(TypeFlags::BUILTIN)
     }
 
-    pub fn is_nat(&self) -> bool {
-        self.flags.contains(TypeFlags::IS_NAT)
+    pub fn produces_nat(&self) -> bool {
+        self.flags.contains(TypeFlags::PRODUCES_NAT)
     }
 }
 
@@ -326,7 +359,7 @@ bitflags! {
     #[derive(Default, Debug, Clone, Copy, Eq, PartialEq)]
     pub struct TypeFlags: u32 {
         const BUILTIN = 1 << 0;
-        const IS_NAT = 1 << 1;
+        const PRODUCES_NAT = 1 << 1;
     }
 }
 
@@ -346,14 +379,6 @@ bitflags! {
         const IS_NEG = 1 << 3;
         const NON_CONST = 1 << 4;
     }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TypeKind {
-    Type,
-    Unit,
-    Bool,
-    Int,
 }
 
 #[derive(Debug)]
@@ -512,7 +537,9 @@ impl TypeExpr {
                     });
                 }
 
-                if ty.args.len() != args.len() {
+                if ty.constructors.is_empty() && ty.args.is_empty() {
+                    ty.args.resize(args.len(), TypeArgFlags::empty());
+                } else if ty.args.len() != args.len() {
                     return Err(ImportError::TypeMismatch {
                         span: *span,
                         message: "type applied with incorrent number of arguments",
@@ -521,7 +548,7 @@ impl TypeExpr {
 
                 for (arg, flags) in std::iter::zip(&args, &mut ty.args) {
                     if arg.is_negated() {
-                        negate = true; // Type can only be negated by its arguments
+                        negate = true; // Type can only be marked as negated by its arguments
 
                         if flags.contains(TypeArgFlags::IS_POS) {
                             return Err(ImportError::TypeMismatch {
@@ -549,8 +576,8 @@ impl TypeExpr {
                 }
 
                 let mut flags = TypeExprFlags::empty();
-                if ty.is_nat() {
-                    flags |= TypeExprFlags::IS_NAT;
+                if ty.produces_nat() {
+                    flags |= TypeExprFlags::IS_NAT_SUBTYPE;
                 }
                 if negate {
                     flags |= TypeExprFlags::NEGATED | TypeExprFlags::TYPECHECK_ONLY;
@@ -577,17 +604,21 @@ impl TypeExpr {
                     negate = true;
                 }
 
-                if !ty.is_nat() && !matches!(&ty.value, TypeExprValue::Type) {
+                let mut flags = TypeExprFlags::empty();
+                if negate {
+                    flags |= TypeExprFlags::NEGATED;
+                }
+                if ty.is_nat_subtype() {
+                    flags |= TypeExprFlags::IS_NAT;
+                }
+
+                if !ty.is_nat_subtype() && !matches!(&ty.value, TypeExprValue::Type) {
+                    println!("TYPE: {ty:#?}");
                     return Err(ImportError::TypeMismatch {
                         span: *span,
                         message: "cannot use a field in an expression unless \
                                 it is either an integer or a type",
                     });
-                }
-
-                let mut flags = ty.flags;
-                if negate {
-                    flags |= TypeExprFlags::NEGATED;
                 }
 
                 Self {
@@ -611,7 +642,7 @@ impl TypeExpr {
         Self {
             span: *span,
             value: TypeExprValue::Nat,
-            flags: TypeExprFlags::IS_NAT,
+            flags: TypeExprFlags::IS_NAT_SUBTYPE,
         }
     }
 
@@ -645,7 +676,7 @@ impl TypeExpr {
                 kind,
                 arg: Rc::new(arg),
             },
-            flags: TypeExprFlags::IS_NAT,
+            flags: TypeExprFlags::IS_NAT_SUBTYPE,
         })
     }
 
@@ -681,6 +712,39 @@ impl TypeExpr {
             });
         }
 
+        let left_negated = left_ty.is_negated();
+        let right_negated = right_ty.is_negated();
+
+        match op {
+            ast::ConstraintOp::Eq => {
+                if left_negated && right_negated {
+                    return Err(ImportError::TypeMismatch {
+                        span: *span,
+                        message: "cannot equate two expressions of negative polarity",
+                    });
+                }
+            }
+            ast::ConstraintOp::Lt | ast::ConstraintOp::Le => {
+                if left_negated {
+                    return Err(ImportError::TypeMismatch {
+                        span: left.span(),
+                        message: "passed an argument of incorrect polarity",
+                    });
+                }
+                if right_negated {
+                    return Err(ImportError::TypeMismatch {
+                        span: right.span(),
+                        message: "passed an argument of incorrect polarity",
+                    });
+                }
+            }
+        }
+
+        let mut flags = TypeExprFlags::empty();
+        if left_negated || right_negated {
+            flags |= TypeExprFlags::NEGATED | TypeExprFlags::TYPECHECK_ONLY;
+        }
+
         Ok(Self {
             span: *span,
             value: TypeExprValue::Constraint {
@@ -688,7 +752,7 @@ impl TypeExpr {
                 left: Rc::new(left_ty),
                 right: Rc::new(right_ty),
             },
-            flags: TypeExprFlags::IS_NAT,
+            flags,
         })
     }
 
@@ -891,15 +955,186 @@ impl TypeExpr {
         })
     }
 
-    fn is_nat(&self) -> bool {
+    pub fn bind_value(
+        &self,
+        field_flags: &mut [FieldFlags],
+        negate: bool,
+        typecheck: bool,
+    ) -> Result<(), ImportError> {
+        // typecheck=true:
+        //   value_negated must be false
+        // typecheck=false:
+        //   negate=false, value_negated=false:
+        //     compute expression, compare to value (only for integers)
+        //   negate=false, value_negated=true:
+        //     compute expression, return it to the "value"
+        //   negate=true, value_negated=false:
+        //     assign the value to the expression to compare some of the
+        //     variables present in the expression
+
+        if typecheck {
+            if self.is_nat() {
+                return Err(ImportError::TypeMismatch {
+                    span: self.span,
+                    message: "cannot check type against an integer expression",
+                });
+            }
+            if negate {
+                return Err(ImportError::TypeMismatch {
+                    span: self.span,
+                    message: "cannot compute a value knowing only its type",
+                });
+            }
+        } else {
+            self.ensure_no_typecheck()?;
+        }
+
+        if negate && self.is_negated() {
+            return Err(ImportError::TypeMismatch {
+                span: self.span,
+                message: "expression has wrong polarity",
+            });
+        }
+
+        if !typecheck && !self.is_nat() {
+            // "true" equality/assignment of type expressions
+            if !negate && !self.is_negated() {
+                match &self.value {
+                    TypeExprValue::Apply { args, .. } if args.is_empty() => {
+                        return Err(ImportError::TypeMismatch {
+                            span: self.span,
+                            message: "use of a global type or an underclared variable",
+                        });
+                    }
+                    _ => {
+                        return Err(ImportError::TypeMismatch {
+                            span: self.span,
+                            message: "cannot check type expressions for equality",
+                        })
+                    }
+                }
+            }
+
+            // Available only if the expression is a free variable
+            if self.is_negated() && !matches!(&self.value, TypeExprValue::Param { .. }) {
+                return Err(ImportError::TypeMismatch {
+                    span: self.span,
+                    message: "types can be assigned only to free type variables",
+                });
+            }
+        }
+
+        match &self.value {
+            TypeExprValue::Type => {
+                debug_assert!(!self.is_nat() && !self.is_negated());
+            }
+            TypeExprValue::Nat => {
+                debug_assert!(!self.is_negated() || typecheck);
+            }
+            TypeExprValue::AltNat { arg, .. } => {
+                debug_assert!(!self.is_negated() || typecheck);
+                arg.bind_value(field_flags, !arg.is_negated(), false)?;
+            }
+            TypeExprValue::Param { index } => {
+                let field_flags = &mut field_flags[*index];
+                if !self.is_negated() || typecheck {
+                    if !field_flags.contains(FieldFlags::IS_KNOWN) {
+                        return Err(ImportError::TypeMismatch {
+                            span: self.span,
+                            message: "variable is used before being assigned to",
+                        });
+                    }
+                    *field_flags |= FieldFlags::IS_USED;
+                } else if !field_flags.contains(FieldFlags::IS_KNOWN) {
+                    *field_flags |= FieldFlags::IS_KNOWN;
+                }
+            }
+            TypeExprValue::Apply { args, .. } => {
+                debug_assert!(!self.is_negated() || typecheck);
+                for arg in args {
+                    if !arg.is_negated() {
+                        arg.bind_value(field_flags, true, false)?;
+                    }
+                }
+                for arg in args {
+                    if arg.is_negated() {
+                        arg.bind_value(field_flags, false, false)?;
+                    }
+                }
+            }
+            TypeExprValue::Add { left, right } => {
+                debug_assert!(self.is_nat() && (!left.is_negated() || !right.is_negated()));
+                left.bind_value(field_flags, !left.is_negated() && self.is_negated(), false)?;
+                right.bind_value(field_flags, !right.is_negated() && self.is_negated(), false)?;
+            }
+            TypeExprValue::GetBit { field, bit } => {
+                debug_assert!(self.is_nat() && !field.is_negated() && !bit.is_negated());
+                debug_assert!(!self.is_negated());
+                field.bind_value(field_flags, false, false)?;
+                bit.bind_value(field_flags, false, false)?;
+            }
+            TypeExprValue::MulConst { right, .. } => {
+                debug_assert!(self.is_nat() && self.is_negated() == right.is_negated());
+                right.bind_value(field_flags, negate, false)?;
+            }
+            TypeExprValue::IntConst { .. } => {
+                debug_assert!(self.is_nat() && !self.is_negated());
+            }
+            TypeExprValue::Tuple { count, item }
+            | TypeExprValue::CondType {
+                cond: count,
+                value: item,
+            } => {
+                debug_assert!(!self.is_negated() && !count.is_negated() && !item.is_negated());
+                debug_assert!(count.is_nat());
+                debug_assert!(!item.is_nat());
+                count.bind_value(field_flags, true, false)?;
+                item.bind_value(field_flags, true, false)?;
+            }
+            TypeExprValue::Ref { value } => {
+                value.bind_value(field_flags, negate, typecheck)?;
+            }
+            TypeExprValue::Constraint { op, left, right } => {
+                let is_negated = self.is_negated();
+                match op {
+                    ast::ConstraintOp::Eq => {
+                        debug_assert!(is_negated == (left.is_negated() || right.is_negated()));
+                        left.bind_value(field_flags, !left.is_negated() && is_negated, false)?;
+                        right.bind_value(field_flags, !right.is_negated() && is_negated, false)?;
+                    }
+                    ast::ConstraintOp::Le | ast::ConstraintOp::Lt => {
+                        debug_assert!(!is_negated || typecheck);
+                        for arg in &[left, right] {
+                            if !arg.is_negated() {
+                                arg.bind_value(field_flags, true, false)?;
+                            }
+                        }
+                        for arg in &[left, right] {
+                            if arg.is_negated() {
+                                arg.bind_value(field_flags, false, false)?;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    pub fn is_nat(&self) -> bool {
         self.flags.contains(TypeExprFlags::IS_NAT)
     }
 
-    fn is_negated(&self) -> bool {
+    pub fn is_nat_subtype(&self) -> bool {
+        self.flags.contains(TypeExprFlags::IS_NAT_SUBTYPE)
+    }
+
+    pub fn is_negated(&self) -> bool {
         self.flags.contains(TypeExprFlags::NEGATED)
     }
 
-    fn ensure_no_typecheck(&self) -> Result<(), ImportError> {
+    pub fn ensure_no_typecheck(&self) -> Result<(), ImportError> {
         if self.flags.contains(TypeExprFlags::TYPECHECK_ONLY) {
             Err(ImportError::TypeMismatch {
                 span: self.span,
@@ -914,8 +1149,13 @@ impl TypeExpr {
 bitflags! {
     #[derive(Default, Debug, Clone, Copy, Eq, PartialEq)]
     pub struct TypeExprFlags: u32 {
-        const TYPECHECK_ONLY = 1 << 1;
-        const IS_NAT = 1 << 2;
+        /// Expression can only be used in type-checking context.
+        const TYPECHECK_ONLY = 1 << 0;
+        /// An integer expression.
+        const IS_NAT = 1 << 1;
+        /// A type that produces integer expressions.
+        const IS_NAT_SUBTYPE = 1 << 2;
+        /// Expression is linearly negative.
         const NEGATED = 1 << 3;
     }
 }
@@ -1135,7 +1375,7 @@ mod tests {
     #[test]
     fn simple() {
         let input = r###"
-        test field:# = Test;
+        test$_ {n:#} field:# {field = ~n} = Test;
         "###;
 
         let mut ctx = parser::Context::default();
