@@ -28,7 +28,7 @@ impl<'a> Resolver<'a> {
     }
 
     pub fn get_type(&self, symbol: Symbol) -> Option<&Type> {
-        self.global.lookup(&symbol)
+        self.global.lookup(symbol)
     }
 
     pub fn get_type_by_name(&self, name: &str) -> Option<&Type> {
@@ -91,14 +91,15 @@ impl<'a> Resolver<'a> {
     }
 
     fn def_constructor(&mut self, ast: &ast::Constructor) -> Result<(), ImportError> {
-        let mut constructor = Constructor {
+        let mut constructor = Box::new(Constructor {
             name: ast.name.map(|name| name.ident),
+            flags: ConstructorFlags::empty(),
             size: SizeRange::any(),
             starts_with: Default::default(),
             fields: Vec::with_capacity(ast.fields.len()),
             output_type: ast.output_type.ident,
             output_type_args: Vec::with_capacity(ast.output_type_args.len()),
-        };
+        });
 
         let ctx = &mut TypeExprContext {
             constructor: &mut constructor,
@@ -143,8 +144,7 @@ impl<'a> Resolver<'a> {
         }
 
         // Define output type
-        let _ty = ctx
-            .scope
+        ctx.scope
             .global
             .register_type(ast.output_type.ident, Default::default());
 
@@ -162,14 +162,16 @@ impl<'a> Resolver<'a> {
                 _ => None,
             };
 
-            ctx.constructor.output_type_args.push(OutputTypeArg {
+            ctx.constructor.output_type_args.push(TypeArg {
                 ty: Rc::new(arg),
                 negate: ast.negate,
                 const_value,
             });
         }
 
-        // TODO: Bind constructor
+        if let Some(ty) = self.global.lookup_mut(ast.output_type.ident) {
+            ty.bind_constructor(constructor, &ast.span)?;
+        }
 
         Ok(())
     }
@@ -178,7 +180,7 @@ impl<'a> Resolver<'a> {
 #[derive(Debug)]
 pub struct Type {
     pub size: SizeRange,
-    pub constructors: Vec<Constructor>,
+    pub constructors: Vec<Box<Constructor>>,
     pub starts_with: BitPfxCollection,
     pub prefix_trie: BinTrie,
     pub flags: TypeFlags,
@@ -201,6 +203,120 @@ impl Default for Type {
 }
 
 impl Type {
+    pub fn bind_constructor(
+        &mut self,
+        mut constructor: Box<Constructor>,
+        span: &parser::Span,
+    ) -> Result<(), ImportError> {
+        // Check type arguments arity
+        if self.constructors.is_empty() {
+            debug_assert!(self.args.is_empty());
+            self.args
+                .resize(constructor.output_type_args.len(), TypeArgFlags::empty());
+        } else if self.args.len() != constructor.output_type_args.len() {
+            return Err(ImportError::TypeMismatch {
+                span: *span,
+                message: "parametrized type redefined with different arity",
+            });
+        }
+
+        // Check type arguments
+        let mut has_pos_params = false;
+        for (arg, flags) in std::iter::zip(&constructor.output_type_args, &mut self.args) {
+            *flags |= if arg.ty.is_nat() {
+                TypeArgFlags::IS_NAT
+            } else {
+                TypeArgFlags::IS_TYPE
+            };
+
+            if flags.contains(TypeArgFlags::IS_NAT | TypeArgFlags::IS_TYPE) {
+                return Err(ImportError::TypeMismatch {
+                    span: arg.ty.span,
+                    message: "formal parameter to type has incorrect type",
+                });
+            }
+
+            *flags |= if arg.negate {
+                TypeArgFlags::IS_NEG
+            } else {
+                TypeArgFlags::IS_POS
+            };
+
+            if flags.contains(TypeArgFlags::IS_POS | TypeArgFlags::IS_NEG) {
+                return Err(ImportError::TypeMismatch {
+                    span: arg.ty.span,
+                    message: "formal parameter to type has incorrect polarity",
+                });
+            }
+
+            if arg.const_value.is_none() {
+                *flags |= TypeArgFlags::NON_CONST;
+            }
+
+            has_pos_params |= !arg.negate;
+        }
+
+        // Check fields
+        let mut has_explicit_fields = false;
+        for field in &mut constructor.fields {
+            if field.is_constraint() {
+                // TODO: Bind value
+                field.flags |= FieldFlags::IS_KNOWN;
+            } else if !field.is_implicit() {
+                has_explicit_fields = true;
+                // TODO: Bind value
+                field.flags |= FieldFlags::IS_KNOWN;
+            }
+        }
+
+        if !has_explicit_fields {
+            constructor.flags |= ConstructorFlags::IS_ENUM;
+        }
+
+        if !has_explicit_fields && !has_pos_params {
+            constructor.flags |= ConstructorFlags::IS_SIMPLE_ENUM;
+        }
+
+        // Bind type arguments
+        for arg in &constructor.output_type_args {
+            if arg.negate {
+                // TODO: Bind value
+            }
+        }
+
+        // Check known fields
+        for field in &constructor.fields {
+            if !field.is_known() {
+                return Err(ImportError::TypeMismatch {
+                    span: field.ty.span,
+                    message: "field is left unbound",
+                });
+            }
+        }
+
+        // Check constructor name
+        if self
+            .constructors
+            .iter()
+            .any(|other| other.name == constructor.name)
+        {
+            return Err(ImportError::TypeMismatch {
+                span: *span,
+                message: "constructor redefined",
+            });
+        }
+
+        // TODO: Assign tag
+        // TODO: Compute IS_FWD flag
+
+        self.constructors.push(constructor);
+        Ok(())
+    }
+
+    pub fn is_builtin(&self) -> bool {
+        self.flags.contains(TypeFlags::BUILTIN)
+    }
+
     pub fn is_nat(&self) -> bool {
         self.flags.contains(TypeFlags::IS_NAT)
     }
@@ -212,7 +328,16 @@ bitflags! {
         const BUILTIN = 1 << 0;
         const IS_NAT = 1 << 1;
     }
+}
 
+#[derive(Debug)]
+pub struct TypeArg {
+    pub ty: Rc<TypeExpr>,
+    pub negate: bool,
+    pub const_value: Option<u32>,
+}
+
+bitflags! {
     #[derive(Default, Debug, Clone, Copy, Eq, PartialEq)]
     pub struct TypeArgFlags: u32 {
         const IS_TYPE = 1 << 0;
@@ -234,18 +359,20 @@ pub enum TypeKind {
 #[derive(Debug)]
 pub struct Constructor {
     pub name: Option<Symbol>,
+    pub flags: ConstructorFlags,
     pub size: SizeRange,
     pub starts_with: BitPfxCollection,
     pub fields: Vec<Field>,
     pub output_type: Symbol,
-    pub output_type_args: Vec<OutputTypeArg>,
+    pub output_type_args: Vec<TypeArg>,
 }
 
-#[derive(Debug)]
-pub struct OutputTypeArg {
-    pub ty: Rc<TypeExpr>,
-    pub negate: bool,
-    pub const_value: Option<u32>,
+bitflags! {
+    #[derive(Default, Debug, Clone, Copy, Eq, PartialEq)]
+    pub struct ConstructorFlags: u32 {
+        const IS_ENUM = 1 << 0;
+        const IS_SIMPLE_ENUM = 1 << 1;
+    }
 }
 
 #[derive(Debug)]
@@ -284,6 +411,14 @@ impl Field {
             ty: Rc::new(expr),
             flags: FieldFlags::empty(),
         })
+    }
+
+    pub fn is_constraint(&self) -> bool {
+        self.flags.contains(FieldFlags::IS_CONSTRAINT)
+    }
+
+    pub fn is_implicit(&self) -> bool {
+        self.flags.contains(FieldFlags::IS_IMPLICIT)
     }
 
     pub fn is_known(&self) -> bool {
@@ -964,8 +1099,12 @@ impl GlobalSymbolTable {
         }
     }
 
-    pub fn lookup(&self, symbol: &Symbol) -> Option<&Type> {
-        self.symbols.get(symbol).map(|ty| ty.as_ref())
+    pub fn lookup(&self, symbol: Symbol) -> Option<&Type> {
+        self.symbols.get(&symbol).map(|ty| ty.as_ref())
+    }
+
+    pub fn lookup_mut(&mut self, symbol: Symbol) -> Option<&mut Type> {
+        self.symbols.get_mut(&symbol).map(|ty| ty.as_mut())
     }
 
     pub fn register_type(&mut self, symbol: Symbol, ty: Box<Type>) -> &mut Type {
@@ -1006,8 +1145,12 @@ mod tests {
         ctx.import(&scheme).unwrap();
 
         for (symbol, ty) in &ctx.global.symbols {
+            if ty.is_builtin() {
+                continue;
+            }
+
             let name = ctx.parser_context.resolve_symbol(*symbol).unwrap();
-            println!("{name}: {ty:?}");
+            println!("{name}: {ty:#?}");
         }
     }
 
