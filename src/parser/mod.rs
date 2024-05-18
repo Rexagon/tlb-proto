@@ -6,7 +6,6 @@ use string_interner::{DefaultBackend, StringInterner};
 pub use self::symbol::Symbol;
 
 pub mod ast;
-pub mod crc;
 mod symbol;
 
 pub type Span = SimpleSpan<usize>;

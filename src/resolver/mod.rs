@@ -5,6 +5,8 @@ use bitflags::bitflags;
 use crate::parser::{self, ast, Symbol};
 use crate::util::{BinTrie, BitPfxCollection, FastHashMap, SizeRange};
 
+mod display;
+
 pub struct Resolver<'a> {
     global: GlobalSymbolTable,
     parser_context: &'a mut parser::Context,
@@ -117,6 +119,13 @@ impl<'a> Resolver<'a> {
     fn def_constructor(&mut self, ast: &ast::Constructor) -> Result<(), ImportError> {
         let mut constructor = Box::new(Constructor {
             name: ast.name.map(|name| name.ident),
+            tag: match &ast.tag {
+                Some(tag) => ConstructorTag {
+                    bits: tag.bits.get(),
+                    value: tag.value,
+                },
+                None => ConstructorTag::new_invalid(),
+            },
             flags: ConstructorFlags::empty(),
             size: SizeRange::any(),
             starts_with: Default::default(),
@@ -152,9 +161,13 @@ impl<'a> Resolver<'a> {
             }
 
             let parsed_field = match field {
-                ast::Field::ImplicitParam { span, ty, .. } => Field::new_implicit_param(*ty, span),
+                ast::Field::ImplicitParam { span, ident, ty } => {
+                    Field::new_implicit_param(*ident, *ty, span)
+                }
                 ast::Field::Constraint { expr, .. } => Field::new_constraint(expr, ctx)?,
-                ast::Field::Param { ty, .. } => Field::new_param(ty, ctx)?,
+                ast::Field::Param { name, ty, .. } => {
+                    Field::new_param(name.as_ref().map(|n| n.ident), ty, ctx)?
+                }
             };
 
             field_flags.push(parsed_field.flags);
@@ -384,6 +397,7 @@ bitflags! {
 #[derive(Debug)]
 pub struct Constructor {
     pub name: Option<Symbol>,
+    pub tag: ConstructorTag,
     pub flags: ConstructorFlags,
     pub size: SizeRange,
     pub starts_with: BitPfxCollection,
@@ -401,14 +415,44 @@ bitflags! {
 }
 
 #[derive(Debug)]
+pub struct ConstructorTag {
+    pub bits: u8,
+    pub value: u32,
+}
+
+impl ConstructorTag {
+    const fn new_invalid() -> Self {
+        Self {
+            bits: u8::MAX,
+            value: 0,
+        }
+    }
+
+    const fn is_set(&self) -> bool {
+        self.bits != u8::MAX
+    }
+
+    const fn as_u64(&self) -> u64 {
+        let termination_bit = 1 << (63 - self.bits);
+        if self.bits == 0 {
+            termination_bit
+        } else {
+            ((self.value as u64) << (64 - self.bits)) | termination_bit
+        }
+    }
+}
+
+#[derive(Debug)]
 pub struct Field {
+    pub ident: Option<Symbol>,
     pub ty: Rc<TypeExpr>,
     pub flags: FieldFlags,
 }
 
 impl Field {
-    pub fn new_implicit_param(ty: ast::GenericType, span: &parser::Span) -> Self {
+    pub fn new_implicit_param(ident: Symbol, ty: ast::GenericType, span: &parser::Span) -> Self {
         Self {
+            ident: Some(ident),
             ty: Rc::new(match ty {
                 ast::GenericType::Type => TypeExpr::new_type(span),
                 ast::GenericType::Nat => TypeExpr::new_nat(span),
@@ -424,15 +468,21 @@ impl Field {
         let expr = TypeExpr::new(expr, &mut ctx.expect_only_type().with_typecheck())?;
 
         Ok(Self {
+            ident: None,
             ty: Rc::new(expr),
             flags: FieldFlags::IS_CONSTRAINT,
         })
     }
 
-    pub fn new_param(expr: &ast::TypeExpr, ctx: &mut TypeExprContext) -> Result<Self, ImportError> {
+    pub fn new_param(
+        ident: Option<Symbol>,
+        expr: &ast::TypeExpr,
+        ctx: &mut TypeExprContext,
+    ) -> Result<Self, ImportError> {
         let expr = TypeExpr::new(expr, &mut ctx.expect_only_type().with_typecheck())?;
 
         Ok(Self {
+            ident,
             ty: Rc::new(expr),
             flags: FieldFlags::empty(),
         })
@@ -858,7 +908,7 @@ impl TypeExpr {
                     count: Rc::new(left_ty),
                     item: Rc::new(right_ty),
                 },
-                flags: TypeExprFlags::IS_NAT,
+                flags: TypeExprFlags::empty(),
             })
         }
     }
@@ -1368,21 +1418,32 @@ pub enum ImportError {
     IntOverflow { span: parser::Span },
 }
 
+impl ImportError {
+    pub fn span(&self) -> &parser::Span {
+        match self {
+            ImportError::TypeMismatch { span, .. } => span,
+            ImportError::IntOverflow { span } => span,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn simple() {
-        let input = r###"
-        test$_ {n:#} field:# {field = ~n} = Test;
-        "###;
+        let input = include_str!("../test/hashmap.tlb");
 
         let mut ctx = parser::Context::default();
         let scheme = ast::Scheme::parse(&mut ctx, input).unwrap();
 
         let mut ctx = Resolver::new(&mut ctx);
-        ctx.import(&scheme).unwrap();
+        if let Err(e) = ctx.import(&scheme) {
+            let span = e.span();
+            let text = &input[span.start..span.end];
+            panic!("{e:?}, text: {text}");
+        }
 
         for (symbol, ty) in &ctx.global.symbols {
             if ty.is_builtin() {
