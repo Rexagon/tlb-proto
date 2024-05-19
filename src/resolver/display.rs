@@ -1,11 +1,11 @@
 use crc::{Crc, CRC_32_ISO_HDLC};
 
-use crate::parser::Symbol;
-use crate::resolver::{Constructor, Field, Resolver, TypeExpr, TypeExprValue};
+use crate::parser::{Context, Symbol};
+use crate::resolver::{Constructor, Field, TypeExpr, TypeExprValue};
 
 use super::TypeArg;
 
-pub fn compute_tag(ctx: &Resolver, constructor: &Constructor) -> u32 {
+pub fn compute_tag(ctx: &Context, constructor: &Constructor) -> u32 {
     use std::fmt::Write;
 
     struct Checksum<'a>(crc::Digest<'a, u32>);
@@ -25,21 +25,21 @@ pub fn compute_tag(ctx: &Resolver, constructor: &Constructor) -> u32 {
 }
 
 impl Constructor {
-    pub fn display<'a>(&'a self, ctx: &'a Resolver) -> impl std::fmt::Display + 'a {
+    pub fn display<'a>(&'a self, ctx: &'a Context) -> impl std::fmt::Display + 'a {
         DisplayCtx {
             data: &(),
             constructor: self,
-            parser_context: ctx.parser_context,
+            parser_context: ctx,
             priority: 0,
             flags: ModeFlags::empty(),
         }
     }
 
-    pub fn display_for_crc<'a>(&'a self, ctx: &'a Resolver) -> impl std::fmt::Display + 'a {
+    pub fn display_for_crc<'a>(&'a self, ctx: &'a Context) -> impl std::fmt::Display + 'a {
         DisplayCtx {
             data: &(),
             constructor: self,
-            parser_context: ctx.parser_context,
+            parser_context: ctx,
             priority: 0,
             flags: ModeFlags::HIDE_TAG | ModeFlags::CRC,
         }
@@ -323,6 +323,7 @@ static CRC: Crc<u32> = Crc::<u32>::new(&CRC_32_ISO_HDLC);
 #[cfg(test)]
 mod tests {
     use crate::parser::{self, ast};
+    use crate::resolver::Resolver;
 
     use super::*;
 
@@ -342,10 +343,10 @@ mod tests {
         let ty = resolver.get_type(output_tye).unwrap();
         let constructor = ty.constructors[0].as_ref();
 
-        println!("{}", constructor.display(&resolver));
-        println!("{}", constructor.display_for_crc(&resolver));
+        println!("{}", constructor.display(&resolver.parser_context));
+        println!("{}", constructor.display_for_crc(&resolver.parser_context));
 
-        let computed = compute_tag(&resolver, &constructor);
+        let computed = compute_tag(&resolver.parser_context, &constructor);
         assert_eq!(computed, tag);
     }
 

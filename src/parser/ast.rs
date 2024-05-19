@@ -77,22 +77,9 @@ pub struct ConstructorTag {
     /// Source location.
     pub span: Span,
     /// Constructor length in bits.
-    pub bits: NonZeroU8,
+    pub bits: u8,
     /// Constructor value.
     pub value: u32,
-}
-
-impl ConstructorTag {
-    pub fn into_prefix(self) -> u64 {
-        self.as_prefix()
-    }
-
-    pub fn as_prefix(&self) -> u64 {
-        let bits = self.bits.get();
-        let prefix = (self.value as u64) << (32 - bits);
-        let termination_bit = 1 << (bits - 1);
-        prefix | termination_bit
-    }
 }
 
 /// Generic argument type.

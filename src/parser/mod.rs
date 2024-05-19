@@ -62,9 +62,8 @@ fn scheme<'a>() -> impl Parser<'a, &'a str, ast::Scheme, State> + Clone {
 fn constructor<'a>() -> impl Parser<'a, &'a str, ast::Constructor, State> + Clone {
     let term = term();
 
-    let name_opt = choice((just('_').to(None), name(IdentType::Lowercase).map(Some))).then(choice(
-        (just("$_").to(None), just("#_").to(None), tag().or_not()),
-    ));
+    let name_opt = choice((just('_').to(None), name(IdentType::Lowercase).map(Some)))
+        .then(choice((empty_tag().map(Some), tag().or_not())));
     let fields = field_list(term.clone());
 
     let output_type = name(IdentType::Uppercase).padded();
@@ -99,6 +98,14 @@ fn constructor<'a>() -> impl Parser<'a, &'a str, ast::Constructor, State> + Clon
             },
         )
         .boxed()
+}
+
+fn empty_tag<'a>() -> impl Parser<'a, &'a str, ast::ConstructorTag, State> + Clone {
+    choice((just("$_"), just("#_"))).map_with(|_, e| ast::ConstructorTag {
+        span: e.span(),
+        bits: 0,
+        value: 0,
+    })
 }
 
 fn tag<'a>() -> impl Parser<'a, &'a str, ast::ConstructorTag, State> + Clone {

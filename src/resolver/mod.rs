@@ -121,7 +121,7 @@ impl<'a> Resolver<'a> {
             name: ast.name.map(|name| name.ident),
             tag: match &ast.tag {
                 Some(tag) => ConstructorTag {
-                    bits: tag.bits.get(),
+                    bits: tag.bits,
                     value: tag.value,
                 },
                 None => ConstructorTag::new_invalid(),
@@ -217,7 +217,12 @@ impl<'a> Resolver<'a> {
         }
 
         if let Some(ty) = self.global.lookup_mut(ast.output_type.ident) {
-            ty.bind_constructor(constructor, &mut field_flags, &ast.span)?;
+            ty.bind_constructor(
+                constructor,
+                &mut field_flags,
+                &ast.span,
+                &self.parser_context,
+            )?;
         }
 
         Ok(())
@@ -253,6 +258,7 @@ impl Type {
         mut constructor: Box<Constructor>,
         field_flags: &mut [FieldFlags],
         span: &parser::Span,
+        parser_context: &parser::Context,
     ) -> Result<(), ImportError> {
         // Check type arguments arity
         if self.constructors.is_empty() && self.args.is_empty() {
@@ -341,18 +347,27 @@ impl Type {
         }
 
         // Check constructor name
-        if self
-            .constructors
-            .iter()
-            .any(|other| other.name == constructor.name)
-        {
-            return Err(ImportError::TypeMismatch {
-                span: *span,
-                message: "constructor redefined",
-            });
+        if let Some(name) = constructor.name {
+            if self.constructors.iter().any(|c| c.name == Some(name)) {
+                return Err(ImportError::TypeMismatch {
+                    span: *span,
+                    message: "constructor redefined",
+                });
+            }
         }
 
-        // TODO: Assign tag
+        // Assign tag
+        if !constructor.tag.is_set() {
+            constructor.tag = if constructor.name.is_some() {
+                ConstructorTag {
+                    bits: 32,
+                    value: self::display::compute_tag(parser_context, &constructor),
+                }
+            } else {
+                ConstructorTag::new_empty()
+            };
+        }
+
         // TODO: Compute IS_FWD flag
 
         self.constructors.push(constructor);
@@ -428,10 +443,15 @@ impl ConstructorTag {
         }
     }
 
+    const fn new_empty() -> Self {
+        Self { bits: 0, value: 0 }
+    }
+
     const fn is_set(&self) -> bool {
         self.bits != u8::MAX
     }
 
+    #[allow(unused)]
     const fn as_u64(&self) -> u64 {
         let termination_bit = 1 << (63 - self.bits);
         if self.bits == 0 {
@@ -1463,6 +1483,10 @@ mod tests {
         let scheme = ast::Scheme::parse(&mut ctx, input).unwrap();
 
         let mut ctx = Resolver::new(&mut ctx);
-        ctx.import(&scheme).unwrap();
+        if let Err(e) = ctx.import(&scheme) {
+            let span = e.span();
+            let text = &input[span.start..span.end];
+            panic!("{e:?}, text: {text}");
+        }
     }
 }
