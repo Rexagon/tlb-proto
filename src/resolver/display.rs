@@ -92,7 +92,7 @@ impl std::fmt::Display for DisplayCtx<'_, Field> {
             f.write_str("{")?;
         }
 
-        if let Some(name) = field.ident {
+        if let Some(name) = field.name {
             write!(f, "{}:", self.display_symbol(name))?;
         }
 
@@ -136,7 +136,7 @@ impl std::fmt::Display for DisplayCtx<'_, TypeExpr> {
                 if self.data.is_negated() ^ self.flags.contains(ModeFlags::AUTO_NEGATE) {
                     f.write_str("~")?;
                 }
-                match self.constructor.fields[*index].ident {
+                match self.constructor.fields[*index].name {
                     Some(ident) => write!(f, "{}", self.display_symbol(ident)),
                     None => write!(f, "_{}", index + 1),
                 }

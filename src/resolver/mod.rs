@@ -148,9 +148,7 @@ impl<'a> Resolver<'a> {
         for (field_index, field) in ast.fields.iter().enumerate() {
             let name_ident = match field.name_ident() {
                 Some(ident) => ident,
-                None => self
-                    .parser_context
-                    .intern_symbol(format!("__field{field_index}")),
+                None => self.parser_context.intern_symbol(format!("_{field_index}")),
             };
 
             if ctx.scope.local.lookup(name_ident).is_some() {
@@ -162,11 +160,13 @@ impl<'a> Resolver<'a> {
 
             let parsed_field = match field {
                 ast::Field::ImplicitParam { span, ident, ty } => {
-                    Field::new_implicit_param(*ident, *ty, span)
+                    Field::new_implicit_param(field_index, *ident, *ty, span)
                 }
-                ast::Field::Constraint { expr, .. } => Field::new_constraint(expr, ctx)?,
+                ast::Field::Constraint { expr, .. } => {
+                    Field::new_constraint(field_index, expr, ctx)?
+                }
                 ast::Field::Param { name, ty, .. } => {
-                    Field::new_param(name.as_ref().map(|n| n.ident), ty, ctx)?
+                    Field::new_param(field_index, name.as_ref().map(|n| n.ident), ty, ctx)?
                 }
             };
 
@@ -368,8 +368,6 @@ impl Type {
             };
         }
 
-        // TODO: Compute IS_FWD flag
-
         self.constructors.push(constructor);
         Ok(())
     }
@@ -421,6 +419,32 @@ pub struct Constructor {
     pub output_type_args: Vec<TypeArg>,
 }
 
+impl Constructor {
+    pub fn is_isomorphic_to(&self, other: &Self, allow_other_names: bool) -> bool {
+        if self.name != other.name
+            || self.tag != other.tag
+            || self.fields.len() != other.fields.len()
+            || self.output_type_args.len() != other.output_type_args.len()
+        {
+            return false;
+        }
+
+        for (field, other_field) in std::iter::zip(&self.fields, &other.fields) {
+            if !field.is_isomorphic_to(other_field, allow_other_names) {
+                return false;
+            }
+        }
+
+        for (arg, other_arg) in std::iter::zip(&self.output_type_args, &other.output_type_args) {
+            if arg.ty != other_arg.ty {
+                return false;
+            }
+        }
+
+        true
+    }
+}
+
 bitflags! {
     #[derive(Default, Debug, Clone, Copy, Eq, PartialEq)]
     pub struct ConstructorFlags: u32 {
@@ -429,7 +453,7 @@ bitflags! {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub struct ConstructorTag {
     pub bits: u8,
     pub value: u32,
@@ -464,15 +488,22 @@ impl ConstructorTag {
 
 #[derive(Debug)]
 pub struct Field {
-    pub ident: Option<Symbol>,
+    pub index: usize,
+    pub name: Option<Symbol>,
     pub ty: Rc<TypeExpr>,
     pub flags: FieldFlags,
 }
 
 impl Field {
-    pub fn new_implicit_param(ident: Symbol, ty: ast::GenericType, span: &parser::Span) -> Self {
+    pub fn new_implicit_param(
+        index: usize,
+        name: Symbol,
+        ty: ast::GenericType,
+        span: &parser::Span,
+    ) -> Self {
         Self {
-            ident: Some(ident),
+            index,
+            name: Some(name),
             ty: Rc::new(match ty {
                 ast::GenericType::Type => TypeExpr::new_type(span),
                 ast::GenericType::Nat => TypeExpr::new_nat(span),
@@ -482,19 +513,22 @@ impl Field {
     }
 
     pub fn new_constraint(
+        index: usize,
         expr: &ast::TypeExpr,
         ctx: &mut TypeExprContext,
     ) -> Result<Self, ImportError> {
         let expr = TypeExpr::new(expr, &mut ctx.expect_only_type().with_typecheck())?;
 
         Ok(Self {
-            ident: None,
+            index,
+            name: None,
             ty: Rc::new(expr),
             flags: FieldFlags::IS_CONSTRAINT,
         })
     }
 
     pub fn new_param(
+        index: usize,
         ident: Option<Symbol>,
         expr: &ast::TypeExpr,
         ctx: &mut TypeExprContext,
@@ -502,10 +536,19 @@ impl Field {
         let expr = TypeExpr::new(expr, &mut ctx.expect_only_type().with_typecheck())?;
 
         Ok(Self {
-            ident,
+            index,
+            name: ident,
             ty: Rc::new(expr),
             flags: FieldFlags::empty(),
         })
+    }
+
+    pub fn is_isomorphic_to(&self, other: &Self, allow_other_names: bool) -> bool {
+        self.index == other.index
+            && self.is_implicit() == other.is_implicit()
+            && self.is_constraint() == other.is_constraint()
+            && (allow_other_names || self.name == other.name)
+            && self.ty == other.ty
     }
 
     pub fn is_constraint(&self) -> bool {
@@ -1212,6 +1255,84 @@ impl TypeExpr {
             })
         } else {
             Ok(())
+        }
+    }
+}
+
+impl Eq for TypeExpr {}
+impl PartialEq for TypeExpr {
+    fn eq(&self, other: &Self) -> bool {
+        match (&self.value, &other.value) {
+            (TypeExprValue::Type, TypeExprValue::Type)
+            | (TypeExprValue::Nat, TypeExprValue::Nat) => true,
+
+            (
+                TypeExprValue::AltNat { kind, arg },
+                TypeExprValue::AltNat {
+                    kind: other_kind,
+                    arg: other_arg,
+                },
+            ) => kind == other_kind && arg == other_arg,
+            (TypeExprValue::Param { index }, TypeExprValue::Param { index: other_index }) => {
+                index == other_index
+            }
+            (
+                TypeExprValue::Apply { type_id, args },
+                TypeExprValue::Apply {
+                    type_id: other_type_id,
+                    args: other_args,
+                },
+            ) => type_id == other_type_id && args == other_args,
+            (
+                TypeExprValue::Add { left, right },
+                TypeExprValue::Add {
+                    left: other_left,
+                    right: other_right,
+                },
+            ) => left == other_left && right == other_right,
+            (
+                TypeExprValue::GetBit { field, bit },
+                TypeExprValue::GetBit {
+                    field: other_field,
+                    bit: other_bit,
+                },
+            ) => field == other_field && bit == other_bit,
+            (
+                TypeExprValue::MulConst { left, right },
+                TypeExprValue::MulConst {
+                    left: other_left,
+                    right: other_right,
+                },
+            ) => left == other_left && right == other_right,
+            (TypeExprValue::IntConst { value }, TypeExprValue::IntConst { value: other_value }) => {
+                value == other_value
+            }
+            (
+                TypeExprValue::Tuple { count, item },
+                TypeExprValue::Tuple {
+                    count: other_count,
+                    item: other_item,
+                },
+            ) => count == other_count && item == other_item,
+            (TypeExprValue::Ref { value }, TypeExprValue::Ref { value: other_value }) => {
+                value == other_value
+            }
+            (
+                TypeExprValue::CondType { cond, value },
+                TypeExprValue::CondType {
+                    cond: other_cond,
+                    value: other_value,
+                },
+            ) => cond == other_cond && value == other_value,
+            (
+                TypeExprValue::Constraint { op, left, right },
+                TypeExprValue::Constraint {
+                    op: other_op,
+                    left: other_left,
+                    right: other_right,
+                },
+            ) => op == other_op && left == other_left && right == other_right,
+            _ => false,
         }
     }
 }
