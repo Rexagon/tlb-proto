@@ -3,7 +3,9 @@ use std::rc::Rc;
 use bitflags::bitflags;
 
 use crate::parser::{self, ast, Symbol};
-use crate::util::{BinTrie, BitPfxCollection, FastHashMap, SizeRange};
+use crate::util::{
+    AbstractNat, AdmissibilityInfo, BinTrie, BitPfxCollection, FastHashMap, SizeRange,
+};
 
 mod display;
 
@@ -25,6 +27,10 @@ impl<'a> Resolver<'a> {
     pub fn import(&mut self, scheme: &ast::Scheme) -> Result<(), ImportError> {
         for ast in &scheme.constructors {
             self.def_constructor(ast)?;
+        }
+
+        for ty in self.global.symbols.values_mut() {
+            ty.compute_admissible_params();
         }
         Ok(())
     }
@@ -108,6 +114,7 @@ impl<'a> Resolver<'a> {
             constructors: Vec::new(),
             starts_with: BitPfxCollection::all(),
             prefix_trie: Default::default(),
+            admissible_params: Default::default(),
             flags: flags | TypeFlags::BUILTIN,
             args: args.to_vec(),
         });
@@ -129,6 +136,7 @@ impl<'a> Resolver<'a> {
             flags: ConstructorFlags::empty(),
             size: SizeRange::any(),
             starts_with: Default::default(),
+            admissible_params: Default::default(),
             fields: Vec::with_capacity(ast.fields.len()),
             output_type: ast.output_type.ident,
             output_type_args: Vec::with_capacity(ast.output_type_args.len()),
@@ -235,6 +243,7 @@ pub struct Type {
     pub constructors: Vec<Box<Constructor>>,
     pub starts_with: BitPfxCollection,
     pub prefix_trie: BinTrie,
+    pub admissible_params: AdmissibilityInfo,
     pub flags: TypeFlags,
     pub args: Vec<TypeArgFlags>,
 }
@@ -246,6 +255,7 @@ impl Default for Type {
             constructors: Vec::new(),
             starts_with: BitPfxCollection::all(),
             prefix_trie: Default::default(),
+            admissible_params: Default::default(),
             flags: TypeFlags::empty(),
             args: Vec::new(),
         }
@@ -372,6 +382,16 @@ impl Type {
         Ok(())
     }
 
+    pub fn compute_admissible_params(&mut self) -> bool {
+        let mut admissible = false;
+        for constructor in &mut self.constructors {
+            admissible |= constructor.compute_admissible_params();
+            self.admissible_params
+                .combine(&constructor.admissible_params);
+        }
+        admissible
+    }
+
     pub fn is_builtin(&self) -> bool {
         self.flags.contains(TypeFlags::BUILTIN)
     }
@@ -414,6 +434,7 @@ pub struct Constructor {
     pub flags: ConstructorFlags,
     pub size: SizeRange,
     pub starts_with: BitPfxCollection,
+    pub admissible_params: AdmissibilityInfo,
     pub fields: Vec<Field>,
     pub output_type: Symbol,
     pub output_type_args: Vec<TypeArg>,
@@ -439,6 +460,44 @@ impl Constructor {
             if arg.ty != other_arg.ty {
                 return false;
             }
+        }
+
+        true
+    }
+
+    fn compute_admissible_params(&mut self) -> bool {
+        let mut dimension = 0;
+
+        // TODO: add params check
+        let mut abstract_params = [AbstractNat::NAN; 4];
+
+        for type_arg in &self.output_type_args {
+            if type_arg.negate || !type_arg.ty.is_nat() {
+                continue;
+            }
+
+            let t = type_arg.ty.abstract_interpret_nat();
+            if t.is_nan() {
+                self.admissible_params.set_all(false);
+                return false;
+            }
+
+            abstract_params[dimension] = t;
+            dimension += 1;
+            if dimension == 4 {
+                break;
+            }
+        }
+
+        while dimension > 0 && abstract_params[dimension - 1].is_any() {
+            dimension -= 1;
+        }
+
+        if dimension == 0 {
+            self.admissible_params.set_all(true);
+        } else {
+            self.admissible_params
+                .set_by_pattern(&abstract_params[..dimension]);
         }
 
         true
@@ -1235,6 +1294,26 @@ impl TypeExpr {
         Ok(())
     }
 
+    pub fn abstract_interpret_nat(&self) -> AbstractNat {
+        if !self.is_nat() || self.flags.contains(TypeExprFlags::TYPECHECK_ONLY) {
+            return AbstractNat::NAN;
+        }
+
+        match &self.value {
+            TypeExprValue::Add { left, right } => {
+                left.abstract_interpret_nat() + right.abstract_interpret_nat()
+            }
+            TypeExprValue::GetBit { field, bit } => field
+                .abstract_interpret_nat()
+                .get_bit(bit.abstract_interpret_nat()),
+            TypeExprValue::MulConst { left, right } => {
+                AbstractNat::new(*left) * right.abstract_interpret_nat()
+            }
+            TypeExprValue::IntConst { value } => AbstractNat::new(*value),
+            _ => AbstractNat::ANY,
+        }
+    }
+
     pub fn is_nat(&self) -> bool {
         self.flags.contains(TypeExprFlags::IS_NAT)
     }
@@ -1574,7 +1653,11 @@ mod tests {
 
     #[test]
     fn simple() {
-        let input = include_str!("../test/hashmap.tlb");
+        // let input = include_str!("../test/hashmap.tlb");
+        let input = r##"
+        a$111 {x:#} test:# = WithGuard (2 * x);
+        b$110 {x:#} test:# = WithGuard (2 * x + 1);
+        "##;
 
         let mut ctx = parser::Context::default();
         let scheme = ast::Scheme::parse(&mut ctx, input).unwrap();

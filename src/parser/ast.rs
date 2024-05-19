@@ -18,9 +18,6 @@
 //! implicit-param = ident : # | ident : Type
 //! param = [ ( ident | _ ) : ] type-expr
 //! ```
-
-use std::num::NonZeroU8;
-
 use crate::parser::{Span, Symbol};
 use crate::util::Recurse;
 
