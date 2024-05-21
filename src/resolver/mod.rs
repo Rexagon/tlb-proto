@@ -32,6 +32,25 @@ impl<'a> Resolver<'a> {
         for ty in self.global.symbols.values_mut() {
             ty.compute_admissible_params();
         }
+
+        let mut type_prefixes =
+            FastHashMap::with_capacity_and_hasher(self.global.symbols.len(), Default::default());
+
+        let mut begins_with_changed = true;
+        while begins_with_changed {
+            begins_with_changed = false;
+            for (type_id, ty) in self.global.symbols.iter_mut() {
+                begins_with_changed |=
+                    ty.compute_constructor_prefixes(*type_id, &mut type_prefixes);
+            }
+        }
+
+        for (type_id, begins_with) in type_prefixes {
+            if let Some(ty) = self.global.lookup_mut(type_id) {
+                ty.begins_with = begins_with;
+            }
+        }
+
         Ok(())
     }
 
@@ -112,7 +131,7 @@ impl<'a> Resolver<'a> {
         let ty = Box::new(Type {
             size,
             constructors: Vec::new(),
-            starts_with: BitPfxCollection::all(),
+            begins_with: BitPfxCollection::all(),
             prefix_trie: Default::default(),
             admissible_params: Default::default(),
             flags: flags | TypeFlags::BUILTIN,
@@ -135,7 +154,7 @@ impl<'a> Resolver<'a> {
             },
             flags: ConstructorFlags::empty(),
             size: SizeRange::any(),
-            starts_with: Default::default(),
+            begins_with: Default::default(),
             admissible_params: Default::default(),
             fields: Vec::with_capacity(ast.fields.len()),
             output_type: ast.output_type.ident,
@@ -241,7 +260,7 @@ impl<'a> Resolver<'a> {
 pub struct Type {
     pub size: SizeRange,
     pub constructors: Vec<Box<Constructor>>,
-    pub starts_with: BitPfxCollection,
+    pub begins_with: BitPfxCollection,
     pub prefix_trie: BinTrie,
     pub admissible_params: AdmissibilityInfo,
     pub flags: TypeFlags,
@@ -253,7 +272,7 @@ impl Default for Type {
         Self {
             size: SizeRange::any(),
             constructors: Vec::new(),
-            starts_with: BitPfxCollection::all(),
+            begins_with: BitPfxCollection::all(),
             prefix_trie: Default::default(),
             admissible_params: Default::default(),
             flags: TypeFlags::empty(),
@@ -263,6 +282,14 @@ impl Default for Type {
 }
 
 impl Type {
+    pub fn is_builtin(&self) -> bool {
+        self.flags.contains(TypeFlags::BUILTIN)
+    }
+
+    pub fn produces_nat(&self) -> bool {
+        self.flags.contains(TypeFlags::PRODUCES_NAT)
+    }
+
     fn bind_constructor(
         &mut self,
         mut constructor: Box<Constructor>,
@@ -382,7 +409,7 @@ impl Type {
         Ok(())
     }
 
-    pub fn compute_admissible_params(&mut self) -> bool {
+    fn compute_admissible_params(&mut self) -> bool {
         let mut admissible = false;
         for constructor in &mut self.constructors {
             admissible |= constructor.compute_admissible_params();
@@ -392,12 +419,25 @@ impl Type {
         admissible
     }
 
-    pub fn is_builtin(&self) -> bool {
-        self.flags.contains(TypeFlags::BUILTIN)
-    }
+    fn compute_constructor_prefixes(
+        &mut self,
+        type_id: Symbol,
+        type_prefixes: &mut FastHashMap<Symbol, BitPfxCollection>,
+    ) -> bool {
+        let mut changed = false;
 
-    pub fn produces_nat(&self) -> bool {
-        self.flags.contains(TypeFlags::PRODUCES_NAT)
+        for constructor in &mut self.constructors {
+            if !constructor.recompute_begins_with(type_prefixes) {
+                continue;
+            }
+
+            changed |= type_prefixes
+                .entry(type_id)
+                .or_default()
+                .merge(&constructor.begins_with);
+        }
+
+        changed
     }
 }
 
@@ -433,7 +473,7 @@ pub struct Constructor {
     pub tag: ConstructorTag,
     pub flags: ConstructorFlags,
     pub size: SizeRange,
-    pub starts_with: BitPfxCollection,
+    pub begins_with: BitPfxCollection,
     pub admissible_params: AdmissibilityInfo,
     pub fields: Vec<Field>,
     pub output_type: Symbol,
@@ -502,6 +542,37 @@ impl Constructor {
 
         true
     }
+
+    fn recompute_begins_with(
+        &mut self,
+        type_prefixes: &mut FastHashMap<Symbol, BitPfxCollection>,
+    ) -> bool {
+        // Search for the first field
+        for field in &self.fields {
+            if field.is_implicit() || field.is_constraint() {
+                continue;
+            }
+
+            match &field.ty.value {
+                // Skip references
+                TypeExprValue::Ref { .. } => continue,
+                // Combine the first field prefix with tag to get the prefix
+                TypeExprValue::Apply { type_id, .. } => match type_prefixes.get(type_id) {
+                    Some(begins_with) => {
+                        let mut field_prefix = begins_with.clone();
+                        field_prefix.prepend(self.tag.as_u64());
+                        return self.begins_with.merge(&field_prefix);
+                    }
+                    None => break,
+                },
+                _ => break,
+            }
+        }
+
+        // Fallback to the tag
+        let tag_prefix = BitPfxCollection::new(self.tag.as_u64());
+        self.begins_with.merge(&tag_prefix)
+    }
 }
 
 bitflags! {
@@ -554,7 +625,7 @@ pub struct Field {
 }
 
 impl Field {
-    pub fn new_implicit_param(
+    fn new_implicit_param(
         index: usize,
         name: Symbol,
         ty: ast::GenericType,
@@ -571,7 +642,7 @@ impl Field {
         }
     }
 
-    pub fn new_constraint(
+    fn new_constraint(
         index: usize,
         expr: &ast::TypeExpr,
         ctx: &mut TypeExprContext,
@@ -586,7 +657,7 @@ impl Field {
         })
     }
 
-    pub fn new_param(
+    fn new_param(
         index: usize,
         ident: Option<Symbol>,
         expr: &ast::TypeExpr,
@@ -785,7 +856,6 @@ impl TypeExpr {
                 }
 
                 if !ty.is_nat_subtype() && !matches!(&ty.value, TypeExprValue::Type) {
-                    println!("TYPE: {ty:#?}");
                     return Err(ImportError::TypeMismatch {
                         span: *span,
                         message: "cannot use a field in an expression unless \
@@ -1127,7 +1197,7 @@ impl TypeExpr {
         })
     }
 
-    pub fn bind_value(
+    fn bind_value(
         &self,
         field_flags: &mut [FieldFlags],
         negate: bool,
@@ -1649,15 +1719,17 @@ impl ImportError {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use super::*;
 
     #[test]
     fn simple() {
-        // let input = include_str!("../test/hashmap.tlb");
-        let input = r##"
-        a$111 {x:#} test:# = WithGuard (2 * x);
-        b$110 {x:#} test:# = WithGuard (2 * x + 1);
-        "##;
+        let input = include_str!("../test/hashmap.tlb");
+        // let input = r##"
+        // a$111 {x:#} test:# = WithGuard (2 * x);
+        // b$110 {x:#} test:# = WithGuard (2 * x + 1);
+        // "##;
 
         let mut ctx = parser::Context::default();
         let scheme = ast::Scheme::parse(&mut ctx, input).unwrap();
@@ -1669,12 +1741,14 @@ mod tests {
             panic!("{e:?}, text: {text}");
         }
 
-        for (symbol, ty) in &ctx.global.symbols {
+        let sorted = ctx.global.symbols.into_iter().collect::<BTreeMap<_, _>>();
+
+        for (symbol, ty) in sorted {
             if ty.is_builtin() {
                 continue;
             }
 
-            let name = ctx.parser_context.resolve_symbol(*symbol).unwrap();
+            let name = ctx.parser_context.resolve_symbol(symbol).unwrap();
             println!("{name}: {ty:#?}");
         }
     }

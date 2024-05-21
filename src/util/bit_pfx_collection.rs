@@ -1,6 +1,6 @@
 use std::ops::{Add, AddAssign};
 
-#[derive(Default, Eq, PartialEq)]
+#[derive(Default, Clone, Eq, PartialEq)]
 pub struct BitPfxCollection {
     items: Vec<u64>,
 }
@@ -178,10 +178,11 @@ impl BitPfxCollection {
         }
 
         // Update elements of the current collection
+        let changed = self.items != result.items;
         self.items = result.items;
 
         // Return whether the collection was changed
-        self.items != other.items
+        changed
     }
 
     /// Adds prefix to the end of prefixes list,
