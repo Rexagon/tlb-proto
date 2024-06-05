@@ -1,31 +1,10 @@
-use crc::{Crc, CRC_32_ISO_HDLC};
-
-use crate::parser::{Context, Symbol};
+use crate::parser::{ParserContext, Symbol};
 use crate::resolver::{Constructor, Field, TypeExpr, TypeExprValue};
 
 use super::TypeArg;
 
-pub fn compute_tag(ctx: &Context, constructor: &Constructor) -> u32 {
-    use std::fmt::Write;
-
-    struct Checksum<'a>(crc::Digest<'a, u32>);
-
-    impl Write for Checksum<'_> {
-        #[inline(always)]
-        fn write_str(&mut self, s: &str) -> std::fmt::Result {
-            self.0.update(s.as_bytes());
-            Ok(())
-        }
-    }
-
-    let mut checksum = Checksum(CRC.digest());
-    write!(&mut checksum, "{}", constructor.display_for_crc(ctx)).unwrap();
-
-    checksum.0.finalize()
-}
-
 impl Constructor {
-    pub fn display<'a>(&'a self, ctx: &'a Context) -> impl std::fmt::Display + 'a {
+    pub fn display<'a>(&'a self, ctx: &'a ParserContext) -> impl std::fmt::Display + 'a {
         DisplayCtx {
             data: &(),
             constructor: self,
@@ -35,7 +14,7 @@ impl Constructor {
         }
     }
 
-    pub fn display_for_crc<'a>(&'a self, ctx: &'a Context) -> impl std::fmt::Display + 'a {
+    pub fn display_for_crc<'a>(&'a self, ctx: &'a ParserContext) -> impl std::fmt::Display + 'a {
         DisplayCtx {
             data: &(),
             constructor: self,
@@ -270,7 +249,7 @@ impl std::fmt::Display for DisplayCtx<'_, Symbol> {
 struct DisplayCtx<'a, T> {
     data: &'a T,
     constructor: &'a Constructor,
-    parser_context: &'a crate::parser::Context,
+    parser_context: &'a crate::parser::ParserContext,
     priority: u32,
     flags: ModeFlags,
 }
@@ -305,7 +284,7 @@ bitflags::bitflags! {
 }
 
 struct DisplaySymbol<'a> {
-    parser_context: &'a crate::parser::Context,
+    parser_context: &'a crate::parser::ParserContext,
     symbol: Symbol,
 }
 
@@ -315,81 +294,5 @@ impl std::fmt::Display for DisplaySymbol<'_> {
             Some(s) => f.write_str(s),
             None => Err(std::fmt::Error),
         }
-    }
-}
-
-static CRC: Crc<u32> = Crc::<u32>::new(&CRC_32_ISO_HDLC);
-
-#[cfg(test)]
-mod tests {
-    use crate::parser::{self, ast};
-    use crate::resolver::Resolver;
-
-    use super::*;
-
-    fn check_tag(tlb: &str, tag: u32) {
-        let mut ctx = parser::Context::default();
-        let constructor = ast::Constructor::parse(&mut ctx, tlb).unwrap();
-
-        let output_tye = constructor.output_type.ident;
-
-        let mut resolver = Resolver::new(&mut ctx);
-        resolver
-            .import(&ast::Scheme {
-                constructors: vec![constructor],
-            })
-            .unwrap();
-
-        let ty = resolver.get_type(output_tye).unwrap();
-        let constructor = ty.constructors[0].as_ref();
-
-        println!("{}", constructor.display(&resolver.parser_context));
-        println!("{}", constructor.display_for_crc(&resolver.parser_context));
-
-        let computed = compute_tag(&resolver.parser_context, &constructor);
-        assert_eq!(computed, tag);
-    }
-
-    #[test]
-    fn correct_tags() {
-        check_tag(
-            r###"
-            block_extra in_msg_descr:^InMsgDescr
-                out_msg_descr:^OutMsgDescr
-                account_blocks:^ShardAccountBlocks
-                rand_seed:bits256
-                created_by:bits256
-                custom:(Maybe ^McBlockExtra) = BlockExtra;
-            "###,
-            0x4a33f6fd,
-        );
-
-        // TODO: Add support for anonymous constructors
-
-        // check_tag(
-        //     r###"
-        //     test {x:#} {y:#} asd:# qwe:(## 4) bbb:(#<= 1) ^[ qqq:# tt:bits256 ] = Test (x + 1) y;
-        //     "###,
-        //     0x3afc7f4c,
-        // );
-
-        check_tag(
-            r###"
-            with_guard {x:#}
-                some:(#<= 10)
-                other:(#<= 10)
-                { some >= 1 }
-                { other <= some }
-                { other >= some } = WithGuard (x * 2);
-            "###,
-            0xd0bd258f,
-        );
-
-        check_tag(
-            r###"
-            hm_edge {n:#} {X:Type} {l:#} {m:#} label:(HmLabel ~l n) {n = (~m) + l} node:(HashmapNode m X) = Hashmap n X;
-            "###,
-            0x2002a049,
-        );
     }
 }

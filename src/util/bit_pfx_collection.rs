@@ -1,6 +1,6 @@
 use std::ops::{Add, AddAssign};
 
-#[derive(Default, Clone, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub struct BitPfxCollection {
     items: Vec<u64>,
 }
@@ -11,9 +11,14 @@ impl BitPfxCollection {
         Self::new(ALL)
     }
 
+    /// Creates a new empty prefix collection.
+    pub const fn empty() -> Self {
+        Self { items: Vec::new() }
+    }
+
     /// Creates a new prefix collection for the specified prefix.
     pub fn new(prefix: u64) -> Self {
-        let mut result = Self::default();
+        let mut result = Self::empty();
         if prefix != 0 {
             result.merge_back(prefix);
         }
@@ -327,13 +332,13 @@ mod tests {
 
     #[test]
     fn merge() {
-        let mut collection = BitPfxCollection::default();
+        let mut collection = BitPfxCollection::empty();
         collection += BitPfxCollection::new(0xca80000000000000);
         collection += BitPfxCollection::new(0x0af8000000000000);
         println!("{collection:#?}");
         assert_eq!(collection.items, [0x0af8000000000000, 0xca80000000000000]);
 
-        let mut other = BitPfxCollection::default();
+        let mut other = BitPfxCollection::empty();
         other += BitPfxCollection::new(0xcd80000000000000);
         other += BitPfxCollection::new(0x0bf8000000000000);
         println!("{other:#?}");

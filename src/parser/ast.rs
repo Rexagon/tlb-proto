@@ -19,22 +19,11 @@
 //! param = [ ( ident | _ ) : ] type-expr
 //! ```
 use crate::parser::{Span, Symbol};
-use crate::util::Recurse;
 
 #[derive(Debug, Clone)]
 pub struct Scheme {
     /// Constructor declarations.
     pub constructors: Vec<Constructor>,
-}
-
-impl Recurse for Scheme {
-    type ArgType = TypeExpr;
-
-    fn recurse<T>(&self, ctx: &mut T, f: fn(ctx: &mut T, expr: &Self::ArgType) -> bool) {
-        for decl in &self.constructors {
-            decl.recurse(ctx, f);
-        }
-    }
 }
 
 /// Object declaration.
@@ -52,20 +41,6 @@ pub struct Constructor {
     pub output_type: Name,
     /// Type arguments for the output type.
     pub output_type_args: Vec<OutputTypeExpr>,
-}
-
-impl Recurse for Constructor {
-    type ArgType = TypeExpr;
-
-    fn recurse<T>(&self, ctx: &mut T, f: fn(ctx: &mut T, expr: &Self::ArgType) -> bool) {
-        for field in &self.fields {
-            field.recurse(ctx, f);
-        }
-
-        for arg in &self.output_type_args {
-            arg.recurse(ctx, f);
-        }
-    }
 }
 
 /// Object constructor tag.
@@ -142,31 +117,12 @@ impl Field {
     }
 }
 
-impl Recurse for Field {
-    type ArgType = TypeExpr;
-
-    fn recurse<T>(&self, ctx: &mut T, f: fn(ctx: &mut T, expr: &Self::ArgType) -> bool) {
-        match self {
-            Self::ImplicitParam { .. } => {}
-            Self::Constraint { expr, .. } | Self::Param { ty: expr, .. } => expr.recurse(ctx, f),
-        }
-    }
-}
-
 /// Output type expression.
 #[derive(Debug, Clone)]
 pub struct OutputTypeExpr {
     pub span: Span,
     pub ty: TypeExpr,
     pub negate: bool,
-}
-
-impl Recurse for OutputTypeExpr {
-    type ArgType = TypeExpr;
-
-    fn recurse<T>(&self, ctx: &mut T, f: fn(ctx: &mut T, expr: &Self::ArgType) -> bool) {
-        self.ty.recurse(ctx, f);
-    }
 }
 
 /// Type expression.
@@ -286,50 +242,6 @@ impl TypeExpr {
             | Self::Apply { span, .. }
             | Self::Ref { span, .. }
             | Self::AnonConstructor { span, .. } => *span,
-        }
-    }
-}
-
-impl Recurse for TypeExpr {
-    type ArgType = Self;
-
-    fn recurse<T>(&self, ctx: &mut T, f: fn(ctx: &mut T, expr: &Self::ArgType) -> bool) {
-        if f(ctx, self) {
-            match self {
-                TypeExpr::Const { .. } | TypeExpr::Nat { .. } => {}
-
-                TypeExpr::AltNat { arg: value, .. } | TypeExpr::Ref { value, .. } => {
-                    value.recurse(ctx, f);
-                }
-
-                TypeExpr::Add { left, right, .. }
-                | TypeExpr::Mul { left, right, .. }
-                | TypeExpr::Constraint { left, right, .. }
-                | TypeExpr::Cond {
-                    cond: left,
-                    value: right,
-                    ..
-                }
-                | TypeExpr::GetBit {
-                    value: left,
-                    bit: right,
-                    ..
-                } => {
-                    left.recurse(ctx, f);
-                    right.recurse(ctx, f);
-                }
-
-                TypeExpr::Apply { args, .. } => {
-                    for arg in args {
-                        arg.recurse(ctx, f);
-                    }
-                }
-                TypeExpr::AnonConstructor { fields, .. } => {
-                    for field in fields {
-                        field.recurse(ctx, f);
-                    }
-                }
-            }
         }
     }
 }

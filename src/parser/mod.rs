@@ -11,11 +11,11 @@ mod symbol;
 pub type Span = SimpleSpan<usize>;
 
 #[derive(Default)]
-pub struct Context {
+pub struct ParserContext {
     interner: StringInterner<DefaultBackend>,
 }
 
-impl Context {
+impl ParserContext {
     pub fn get_symbol<T: AsRef<str>>(&self, string: T) -> Option<Symbol> {
         self.interner.get(string).map(Into::into)
     }
@@ -30,13 +30,13 @@ impl Context {
 }
 
 impl ast::Scheme {
-    pub fn parse(ctx: &mut Context, input: &str) -> Result<Self, Vec<ParserError>> {
+    pub fn parse(ctx: &mut ParserContext, input: &str) -> Result<Self, Vec<ParserError>> {
         scheme().parse_with_state(input, ctx).into_result()
     }
 }
 
 impl ast::Constructor {
-    pub fn parse(ctx: &mut Context, input: &str) -> Result<Self, Vec<ParserError>> {
+    pub fn parse(ctx: &mut ParserContext, input: &str) -> Result<Self, Vec<ParserError>> {
         constructor()
             .padded()
             .parse_with_state(input, ctx)
@@ -507,7 +507,7 @@ enum IdentType {
     Uppercase,
 }
 
-type State = extra::Full<ParserError, Context, ()>;
+type State = extra::Full<ParserError, ParserContext, ()>;
 
 #[derive(thiserror::Error, Debug)]
 pub enum ParserError {
@@ -558,7 +558,7 @@ mod tests {
 
     #[test]
     fn hashmap_scheme() {
-        let mut ctx = Context::default();
+        let mut ctx = ParserContext::default();
         let input = include_str!("../test/hashmap.tlb");
         let result = ast::Scheme::parse(&mut ctx, input);
         println!("{:#?}", result.unwrap());
@@ -566,7 +566,7 @@ mod tests {
 
     #[test]
     fn full_scheme() {
-        let mut ctx = Context::default();
+        let mut ctx = ParserContext::default();
         let input = include_str!("../test/block.tlb");
         let result = ast::Scheme::parse(&mut ctx, input);
         println!("{:#?}", result.unwrap());
