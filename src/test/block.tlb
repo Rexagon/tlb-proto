@@ -9,7 +9,7 @@ nothing$0 {X:Type} = Maybe X;
 just$1 {X:Type} value:X = Maybe X;
 left$0 {X:Type} {Y:Type} value:X = Either X Y;
 right$1 {X:Type} {Y:Type} value:Y = Either X Y;
-pair$_ {X:Type} {Y:Type} first:X second:Y = Both X Y;
+pair$_ {X:Type} {Y:Type} first:X second:Y, 123} = Both X Y;
 
 bit$_ (## 1) = Bit;
 /*

@@ -97,22 +97,27 @@ pub enum Field {
         /// Field type.
         ty: Box<TypeExpr>,
     },
+    Invalid {
+        /// Source location.
+        span: Span,
+    },
 }
 
 impl Field {
     pub fn name_ident(&self) -> Option<Symbol> {
         match self {
-            Field::ImplicitParam { ident, .. } => Some(*ident),
-            Field::Constraint { .. } => None,
-            Field::Param { name, .. } => name.map(|n| n.ident),
+            Self::ImplicitParam { ident, .. } => Some(*ident),
+            Self::Constraint { .. } | Self::Invalid { .. } => None,
+            Self::Param { name, .. } => name.map(|n| n.ident),
         }
     }
 
     pub fn span(&self) -> Span {
         match self {
-            Field::ImplicitParam { span, .. }
-            | Field::Constraint { span, .. }
-            | Field::Param { span, .. } => *span,
+            Self::ImplicitParam { span, .. }
+            | Self::Constraint { span, .. }
+            | Self::Param { span, .. }
+            | Self::Invalid { span } => *span,
         }
     }
 }
@@ -134,12 +139,14 @@ pub enum TypeExpr {
     /// test field:123 = Test;
     /// ```
     Const { span: Span, value: u32 },
+
     /// 32-bit unsigned integer type.
     ///
     /// ```text
     /// test field:# = Test;
     /// ```
     Nat { span: Span },
+
     /// Unsigned integer type with bits info.
     ///
     /// ```text
@@ -152,6 +159,7 @@ pub enum TypeExpr {
         kind: AltNat,
         arg: Box<TypeExpr>,
     },
+
     /// Addition expression with integer values.
     ///
     /// ```text
@@ -162,6 +170,7 @@ pub enum TypeExpr {
         left: Box<TypeExpr>,
         right: Box<TypeExpr>,
     },
+
     /// Multiplication expression with integer values.
     ///
     /// ```text
@@ -172,6 +181,7 @@ pub enum TypeExpr {
         left: Box<TypeExpr>,
         right: Box<TypeExpr>,
     },
+
     /// A constraint expression.
     ///
     /// ```text
@@ -183,6 +193,7 @@ pub enum TypeExpr {
         left: Box<TypeExpr>,
         right: Box<TypeExpr>,
     },
+
     /// Conditional field.
     ///
     /// ```text
@@ -193,6 +204,7 @@ pub enum TypeExpr {
         cond: Box<TypeExpr>,
         value: Box<TypeExpr>,
     },
+
     /// Get bit from the field.
     ///
     /// ```text
@@ -203,6 +215,7 @@ pub enum TypeExpr {
         value: Box<TypeExpr>,
         bit: Box<TypeExpr>,
     },
+
     /// Type identifier with type parameters.
     ///
     /// ```text
@@ -214,18 +227,23 @@ pub enum TypeExpr {
         args: Vec<TypeExpr>,
         negate: bool,
     },
+
     /// Type serialized into a separate cell.
     ///
     /// ```text
     /// test field:^(## 64) = Test;
     /// ```
     Ref { span: Span, value: Box<TypeExpr> },
+
     /// Anonymous constructor.
     ///
     /// ```text
     /// test [ field:# ] = Test;
     /// ```
     AnonConstructor { span: Span, fields: Vec<Field> },
+
+    /// Type expression is invalid.
+    Invalid { span: Span },
 }
 
 impl TypeExpr {
@@ -241,7 +259,8 @@ impl TypeExpr {
             | Self::GetBit { span, .. }
             | Self::Apply { span, .. }
             | Self::Ref { span, .. }
-            | Self::AnonConstructor { span, .. } => *span,
+            | Self::AnonConstructor { span, .. }
+            | Self::Invalid { span } => *span,
         }
     }
 }

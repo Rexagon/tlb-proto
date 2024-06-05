@@ -1,9 +1,12 @@
+use std::collections::BTreeSet;
+
 use chumsky::extra;
 use chumsky::prelude::*;
 use chumsky::util::MaybeRef;
 use string_interner::{DefaultBackend, StringInterner};
 
 pub use self::symbol::Symbol;
+use crate::error::{map_span, Error, ParserError, TokenFormat};
 
 pub mod ast;
 mod symbol;
@@ -30,8 +33,14 @@ impl ParserContext {
 }
 
 impl ast::Scheme {
-    pub fn parse(ctx: &mut ParserContext, input: &str) -> Result<Self, Vec<ParserError>> {
-        scheme().parse_with_state(input, ctx).into_result()
+    pub fn parse(ctx: &mut ParserContext, input: &str) -> Result<Self, miette::Error> {
+        match scheme().parse_with_state(input, ctx).into_result() {
+            Ok(scheme) => Ok(scheme),
+            Err(errors) => Err(miette::Error::new(Error {
+                errors: errors.into_iter().map(Into::into).collect(),
+            })
+            .with_source_code(input.to_owned())),
+        }
     }
 }
 
@@ -114,10 +123,13 @@ fn tag<'a>() -> impl Parser<'a, &'a str, ast::ConstructorTag, State> + Clone {
     let binary = just('$')
         .ignore_then(one_of("01").repeated().at_least(1).to_slice())
         .try_map_with(|s, e: &mut MapExtra<_, State>| {
-            let value = u32::from_str_radix(s, 2).map_err(|source| ParserError::InvalidInt {
-                span: e.span(),
-                source,
-            })?;
+            let value =
+                u32::from_str_radix(s, 2).map_err(|source| ParserError::MessageWithHelp {
+                    label: None,
+                    span: map_span(e.span()),
+                    message: source.to_string(),
+                    help: "consider using a binary number",
+                })?;
 
             Ok(ast::ConstructorTag {
                 span: e.span(),
@@ -135,10 +147,13 @@ fn tag<'a>() -> impl Parser<'a, &'a str, ast::ConstructorTag, State> + Clone {
                 .to_slice(),
         )
         .try_map_with(|s, e: &mut MapExtra<_, State>| {
-            let value = u32::from_str_radix(s, 16).map_err(|source| ParserError::InvalidInt {
-                span: e.span(),
-                source,
-            })?;
+            let value =
+                u32::from_str_radix(s, 16).map_err(|source| ParserError::MessageWithHelp {
+                    label: None,
+                    span: map_span(e.span()),
+                    message: source.to_string(),
+                    help: "consider using a hexadecimal number",
+                })?;
 
             Ok(ast::ConstructorTag {
                 span: e.span(),
@@ -178,6 +193,10 @@ fn field<'a>(
         expr: Box::new(expr),
     });
 
+    let implicit_recovery = just('{')
+        .then(none_of('}').repeated().then(just('}')))
+        .map_with(|_, e| ast::Field::Invalid { span: e.span() });
+
     let param = name(IdentType::Any)
         .then_ignore(just(':').padded())
         .or_not()
@@ -191,25 +210,37 @@ fn field<'a>(
     choice((
         choice((implicit_param, constraint))
             .padded()
-            .delimited_by(just('{'), just('}')),
+            .delimited_by(just('{'), just('}'))
+            .recover_with(via_parser(implicit_recovery)),
         param,
     ))
     .boxed()
 }
 
 fn term<'a>() -> Recursive<dyn Parser<'a, &'a str, ast::TypeExpr, State> + 'a> {
+    fn scope_recovery<'a>(
+        open: char,
+        close: char,
+    ) -> impl Parser<'a, &'a str, ast::TypeExpr, State> + Clone + 'a {
+        just(open)
+            .then(none_of(close).repeated().then(just(close)))
+            .map_with(|_, e| ast::TypeExpr::Nat { span: e.span() })
+    }
+
     recursive(move |term| {
         choice((
             expr(term.clone())
                 .padded()
-                .delimited_by(just('('), just(')')),
+                .delimited_by(just('('), just(')'))
+                .recover_with(via_parser(scope_recovery('(', ')'))),
             field_list(term.clone())
                 .padded()
                 .delimited_by(just('['), just(']'))
                 .map_with(|fields, e| ast::TypeExpr::AnonConstructor {
                     span: e.span(),
                     fields,
-                }),
+                })
+                .recover_with(via_parser(scope_recovery('[', ']'))),
             just('#').map_with(|_, e| ast::TypeExpr::Nat { span: e.span() }),
             nat_const().map_with(|value, e| ast::TypeExpr::Const {
                 span: e.span(),
@@ -348,7 +379,11 @@ fn expr_90<'a>(
             }
 
             let ast::TypeExpr::Apply { span, args, .. } = &mut res else {
-                emitter.emit(ParserError::InvalidApply { span: e.span() });
+                emitter.emit(ParserError::Message {
+                    label: Some("invalid expression"),
+                    span: map_span(e.span()),
+                    message: "cannot apply one expression to another".to_owned(),
+                });
                 return res;
             };
 
@@ -408,9 +443,10 @@ fn nat_const<'a>() -> impl Parser<'a, &'a str, u32, State> + Clone {
         .validate(|s: &str, e, emitter| match s.parse::<u32>() {
             Ok(value) => value,
             Err(source) => {
-                emitter.emit(ParserError::InvalidInt {
-                    span: e.span(),
-                    source,
+                emitter.emit(ParserError::Message {
+                    label: None,
+                    span: map_span(e.span()),
+                    message: source.to_string(),
                 });
                 0
             }
@@ -430,7 +466,15 @@ fn implicit_ty<'a>() -> impl Parser<'a, &'a str, ast::GenericType, State> + Clon
                 "Type" => ast::GenericType::Type,
                 "#" => ast::GenericType::Nat,
                 _ => {
-                    emitter.emit(ParserError::InvalidImplicit { span: e.span() });
+                    emitter.emit(ParserError::Unexpected {
+                        label: None,
+                        span: map_span(e.span()),
+                        found: TokenFormat::Kind("identifier"),
+                        expected: BTreeSet::from([
+                            TokenFormat::Token("Type"),
+                            TokenFormat::Token("#"),
+                        ]),
+                    });
                     ast::GenericType::Type
                 }
             },
@@ -462,15 +506,31 @@ fn ident<'a>(ty: IdentType) -> impl Parser<'a, &'a str, Symbol, State> + Clone {
                         IdentType::Lowercase
                             if !first.is_ascii_lowercase() && first != '!' && ident != "_" =>
                         {
-                            emitter.emit(ParserError::LowercastIdentExpected { span: e.span() })
+                            emitter.emit(ParserError::Message {
+                                label: Some("invalid identifier"),
+                                span: map_span(e.span()),
+                                message: "expected an identifier starting with a \
+                                    lowercase letter or underscore"
+                                    .to_owned(),
+                            })
                         }
                         IdentType::Uppercase if !first.is_ascii_uppercase() => {
-                            emitter.emit(ParserError::UppercaseIdentExpected { span: e.span() })
+                            emitter.emit(ParserError::Message {
+                                label: Some("invalid identifier"),
+                                span: map_span(e.span()),
+                                message: "expected an identifier starting with an uppercase letter"
+                                    .to_owned(),
+                            })
                         }
                         _ => break 'ident ident,
                     }
                 } else {
-                    emitter.emit(ParserError::IdentExpected { span: e.span() });
+                    emitter.emit(ParserError::Unexpected {
+                        label: Some("unexpected number"),
+                        span: map_span(e.span()),
+                        found: TokenFormat::Kind("number"),
+                        expected: BTreeSet::from([ty.as_token_format()]),
+                    });
                 }
                 INVALID_IDENT
             };
@@ -507,46 +567,42 @@ enum IdentType {
     Uppercase,
 }
 
-type State = extra::Full<ParserError, ParserContext, ()>;
-
-#[derive(thiserror::Error, Debug)]
-pub enum ParserError {
-    #[error("unexpected character found: {found:?}")]
-    UnexpectedChar { span: Span, found: Option<char> },
-    #[error("identifier expected")]
-    IdentExpected { span: Span },
-    #[error("lowercase identifier expected")]
-    LowercastIdentExpected { span: Span },
-    #[error("uppercase identifier expected")]
-    UppercaseIdentExpected { span: Span },
-    #[error("invalid integer: {source}")]
-    InvalidInt {
-        span: Span,
-        #[source]
-        source: std::num::ParseIntError,
-    },
-    #[error("either `Type` or `#` implicit parameter expected")]
-    InvalidImplicit { span: Span },
-    #[error("cannot apply one expression to another")]
-    InvalidApply { span: Span },
-    #[error("unknown error")]
-    Unknown,
+impl IdentType {
+    fn as_token_format(&self) -> TokenFormat {
+        match self {
+            IdentType::Any => TokenFormat::Kind("identifier"),
+            IdentType::Lowercase => TokenFormat::Kind("constructor name"),
+            IdentType::Uppercase => TokenFormat::Kind("type name"),
+        }
+    }
 }
 
+type State = extra::Full<ParserError, ParserContext, ()>;
+
 impl<'a> chumsky::error::Error<'a, &'a str> for ParserError {
-    fn expected_found<Iter: IntoIterator<Item = Option<MaybeRef<'a, char>>>>(
-        _: Iter,
+    fn expected_found<E: IntoIterator<Item = Option<MaybeRef<'a, char>>>>(
+        expected: E,
         found: Option<MaybeRef<'a, char>>,
         span: Span,
     ) -> Self {
-        Self::UnexpectedChar {
-            span,
-            found: found.as_deref().copied(),
+        Self::Unexpected {
+            label: None,
+            span: map_span(span),
+            found: found.into(),
+            expected: expected.into_iter().map(Into::into).collect(),
         }
     }
 
-    fn merge(self, _: Self) -> Self {
-        self
+    fn merge(mut self, other: Self) -> Self {
+        match (&mut self, other) {
+            (Self::Unclosed { .. }, _) => self,
+            (_, other @ Self::Unclosed { .. }) => other,
+            (Self::Unexpected { expected: dest, .. }, Self::Unexpected { expected, .. }) => {
+                dest.extend(expected.into_iter());
+                self
+            }
+            (_, other) => todo!("{} -> {}", self, other),
+        }
     }
 }
 
@@ -569,6 +625,6 @@ mod tests {
         let mut ctx = ParserContext::default();
         let input = include_str!("../test/block.tlb");
         let result = ast::Scheme::parse(&mut ctx, input);
-        println!("{:#?}", result.unwrap());
+        println!("{:?}", result.unwrap());
     }
 }

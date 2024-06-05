@@ -89,6 +89,7 @@ pub fn constructor(
             ast::Field::Param { name, ty, .. } => {
                 Field::new_param(field_index, name.as_ref().map(|n| n.ident), ty, ctx)?
             }
+            ast::Field::Invalid { .. } => unreachable!(),
         };
 
         field_flags.push(parsed_field.flags);
@@ -334,6 +335,7 @@ impl TypeExpr {
             } => Self::new_apply(*ident, args, *negate, span, ctx),
             ast::TypeExpr::Ref { span, value } => Self::new_ref(value, span, ctx),
             ast::TypeExpr::AnonConstructor { .. } => todo!(),
+            ast::TypeExpr::Invalid { .. } => unreachable!(),
         }
     }
 
